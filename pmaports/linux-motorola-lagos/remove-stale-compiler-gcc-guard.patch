@@ -1,0 +1,17 @@
+Modern kernel builds force-inject compiler_types.h via -include on the
+command line for every compiled object (see c_flags in scripts/Makefile.lib),
+which never goes through <linux/compiler.h>. The old guard here assumes
+compiler_types.h always sets __LINUX_COMPILER_TYPES_H via that path first,
+which is no longer true, so it fires a hard #error on every host-tool build
+(scripts/mod/*). The guard is vestigial for a kernel this modern; strip it.
+
+--- a/include/linux/compiler-gcc.h
++++ b/include/linux/compiler-gcc.h
+@@ -1,7 +1,4 @@
+ /* SPDX-License-Identifier: GPL-2.0 */
+-#ifndef __LINUX_COMPILER_TYPES_H
+-#error "Please don't include <linux/compiler-gcc.h> directly, include <linux/compiler.h> instead."
+-#endif
+ 
+ /*
+  * Common definitions for all gcc versions go here.

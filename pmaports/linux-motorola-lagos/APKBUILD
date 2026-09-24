@@ -1,0 +1,66 @@
+# Reference: <https://postmarketos.org/vendorkernel>
+# Kernel config based on: arch/arm64/configs/gki_defconfig
+
+maintainer=""
+pkgname=linux-motorola-lagos
+pkgver=6.6.66
+pkgrel=2
+pkgdesc="Motorola Moto G06 kernel fork"
+arch="aarch64"
+_carch="arm64"
+_flavor="motorola-lagos"
+url="https://kernel.org"
+license="GPL-2.0-only"
+options="!strip !check !tracedeps pmb:cross-native"
+makedepends="
+	bash
+	bc
+	bison
+	devicepkg-dev
+	findutils
+	flex
+	linux-headers
+	openssl-dev
+	perl
+"
+
+# Source
+_repository="kernel-mtk"
+_commit="1af1d8f5118724f29b3d0e67b39a8fd03f0477cf"
+_config="config-$_flavor.$arch"
+source="
+	$pkgname-$_commit.tar.gz::https://github.com/MotorolaMobilityLLC/$_repository/archive/$_commit.tar.gz
+	$_config
+	remove-stale-compiler-gcc-guard.patch
+"
+builddir="$srcdir/$_repository-$_commit"
+_outdir="out"
+
+prepare() {
+	default_prepare
+	REPLACE_GCCH=0
+	. downstreamkernel_prepare
+}
+
+build() {
+	unset LDFLAGS
+	make O="$_outdir" ARCH="$_carch" CC="${CC:-gcc}" \
+		KBUILD_BUILD_VERSION="$((pkgrel + 1 ))-postmarketOS"
+}
+
+package() {
+	downstreamkernel_package "$builddir" "$pkgdir" "$_carch" \
+		"$_flavor" "$_outdir"
+	make dtbs_install O="$_outdir" ARCH="$_carch" \
+		INSTALL_DTBS_PATH="$pkgdir"/boot/dtbs
+
+	# MTK LK always decompresses the kernel ("decompress kernel image fail!!!"
+	# on a raw Image), so ship Image.gz like stock boot_a does
+	install -Dm644 "$_outdir"/arch/$_carch/boot/Image.gz "$pkgdir"/boot/vmlinuz
+}
+
+sha512sums="
+b93662c9f8cebb5d84a5f3246d508f3d0e2100f0fe30e26337941a66c49cc52fe8bd14c27b922d069b19987c02980f35f7887e686fce7bf61e338340c98c17a5  linux-motorola-lagos-1af1d8f5118724f29b3d0e67b39a8fd03f0477cf.tar.gz
+f05e6dd09153773b44efef1e2fcf7dd93e1e91feaf95697d2f5f6cc8ba03bb36c724edb92176a804308aed722fdc89e25e9067df6cc837efcc1a395fcc14265b  config-motorola-lagos.aarch64
+aacc2448a5deed39dc9965985c2cacfdf6a14f3401a054ee91fa5481a97bd825749a457ab634457ffa46056526f47b957a4b2660dd886858d4ced39b98a62356  remove-stale-compiler-gcc-guard.patch
+"

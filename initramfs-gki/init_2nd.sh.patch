@@ -1,0 +1,14 @@
+--- a/init_2nd.sh
++++ b/init_2nd.sh
+@@ -15,6 +15,11 @@
+ trap 'poweroff -f' USR2
+ trap 'reboot -f' TERM
+ 
++# lagos: storage, USB, watchdog etc. come from the stock GKI vendor modules.
++# Load them in stock modules.load order before udev starts, since udev's
++# modalias autoloading races them (clkbuf oopses if it probes before pmic-wrap)
++load_gki_modules
++
+ # Run udev early, before splash, to make sure any relevant display drivers are
+ # loaded in time
+ setup_udev

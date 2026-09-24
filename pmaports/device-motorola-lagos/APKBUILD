@@ -1,0 +1,39 @@
+# Reference: <https://postmarketos.org/devicepkg>
+maintainer=""
+pkgname=device-motorola-lagos
+pkgver=1
+pkgrel=1
+pkgdesc="Motorola Moto G06"
+url="https://postmarketos.org"
+arch="aarch64"
+license="MIT"
+depends="
+	android-tools-mkbootimg
+	linux-motorola-lagos
+	postmarketos-base
+	postmarketos-base-downstream
+	"
+makedepends="devicepkg-dev"
+source="
+	deviceinfo
+	modules-initfs
+	lagos-stock.dtb
+	"
+options="!archcheck !check"
+
+build() {
+	devicepkg_build $startdir $pkgname
+}
+
+package() {
+	devicepkg_package $startdir $pkgname
+
+	# Stock MTK dt_table blob from vendor_boot_a; LK reads it from vendor_boot's dtb section
+	install -Dm644 "$srcdir"/lagos-stock.dtb "$pkgdir"/usr/share/dtb/lagos-stock.dtb
+}
+
+sha512sums="
+7c84dd13c84655384d3d297a7c2b22d602a03160361c3849fecd598be6b997690e581a3e8dbc2856c814f239a396ae0ab6e114b91d115e407b0e4088e31d0707  deviceinfo
+e70bae17df23dcaaaea0e2d3616556f04baa23f8ee1357785c0f539bf97282d8ddff53953e155b72689bb73beb38c2da3d08de2a61e866684edfa10a6593885d  modules-initfs
+2f42fc7e5944464ffbb589a9cc1cf844041822c853506a3dee2a9f3948f83b7cd6df3ade39226489fad17acfd4c2ea981ccfaaf1ea7ec1a035c6b03895802eab  lagos-stock.dtb
+"

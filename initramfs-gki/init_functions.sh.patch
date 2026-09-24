@@ -1,0 +1,58 @@
+--- a/init_functions.sh
++++ b/init_functions.sh
+@@ -274,7 +274,11 @@
+ 	# mdev
+ 	mount -t proc -o nodev,noexec,nosuid proc /proc || echo "Couldn't mount /proc"
+ 	mount -t sysfs -o nodev,noexec,nosuid sysfs /sys || echo "Couldn't mount /sys"
+-	mount -t devtmpfs -o mode=0755,nosuid dev /dev || echo "Couldn't mount /dev"
++	# lagos: the stock GKI kernel has no devtmpfs, populate a tmpfs /dev with mdev
++	if ! mount -t devtmpfs -o mode=0755,nosuid dev /dev 2>/dev/null; then
++		mount -t tmpfs -o mode=0755,nosuid dev /dev || echo "Couldn't mount /dev"
++		mdev -s
++	fi
+ 	mount -t tmpfs -o nosuid,nodev,mode=0755 run /run || echo "Couldn't mount /run"
+ 
+ 	modprobe libcomposite 2>/dev/null || true
+@@ -404,6 +408,8 @@
+ 				SUBPARTITION_DEV="$partition"
+ 				# shellcheck disable=SC2086
+ 				SUBPARTITION_LOOP="$(losetup $losetup_args "$partition")"
++				# lagos: no devtmpfs, create the loop partition nodes
++				mdev -s
+ 				if [ -z "$SUBPARTITION_LOOP" ]; then
+ 					echo "WARNING: failed to create loop device for $partition"
+ 					SUBPARTITION_DEV=""
+@@ -1434,9 +1440,33 @@
+ fail_halt_boot() {
+ 	beebzzr -b 3 -d 250 &
+ 	export_logs
++	lagos_debug_crash "fail_halt_boot"
+ 	debug_shell
+ 	echo "Looping forever"
+ 	while true; do
+ 		sleep 1
+ 	done
+ }
++
++# lagos: load the stock first-stage vendor modules in stock modules.load order
++load_gki_modules() {
++	local module
++	local failed=0
++	[ -f /lib/modules/gki.load ] || return
++	echo "Loading $(wc -l < /lib/modules/gki.load) GKI vendor modules"
++	while read -r module; do
++		modprobe "$module" 2>&1 || { echo "GKI module failed: $module"; failed=$((failed + 1)); }
++	done < /lib/modules/gki.load
++	echo "GKI vendor modules done, $failed failed"
++	mdev -s
++}
++
++# lagos: no UART, so crash on purpose to get the logs into pstore/expdb
++lagos_debug_crash() {
++	echo "lagos debug crash: $1"
++	ls /dev/mmcblk* /dev/block 2>&1 | head -20
++	cat /proc/partitions 2>&1 | head -40
++	sync
++	sleep 2
++	echo c > /proc/sysrq-trigger
++}

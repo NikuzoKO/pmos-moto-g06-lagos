@@ -1,0 +1,20 @@
+--- a/init.sh
++++ b/init.sh
+@@ -39,6 +39,9 @@
+ echo "initramfs version: $INITRAMFS_PKG_VERSION"
+ setup_firmware_path
+ 
++# lagos: crash for logs if still stuck in the initramfs after 150s
++( sleep 150; [ -e /init_functions.sh ] && lagos_debug_crash "150s timeout" ) &
++
+ # Jump straight to the 2nd stage init if available
+ # (no separate -extra) or no-op otherwise
+ jump_init_2nd
+@@ -49,6 +52,7 @@
+ setup_mdev
+ 
+ load_modules /lib/modules/initramfs.load
++load_gki_modules
+ 
+ setup_usb_network
+ start_unudhcpd
