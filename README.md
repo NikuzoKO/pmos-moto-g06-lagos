@@ -15,7 +15,7 @@ Galaxy A31's "Helio P65").
 | USB networking | ✅ CDC NCM gadget, phone at `172.16.42.1` |
 | initramfs → rootfs | ✅ `switch_root` into the pmOS rootfs, systemd reaches a (degraded) running state |
 | SSH | ✅ `ssh user@172.16.42.1`. **~29s from reboot to SSH, no manual steps** (with plymouth masked, see below) |
-| Display | ⚠️ Vendor MTK DRM loads (`/dev/dri/card0`, a connector reports `connected`), but nothing draws yet. The screen stays on LK's "hello moto" frame |
+| Display | ⚠️ Vendor MTK DRM loads (driver `mediatek`, DSI-1 720x1640 connected). `modetest -M mediatek -s 32@114:720x1640-60` sets the mode and the backlight stays lit, but the screen goes black: no frame is ever produced (`frame:0`, page flips never complete). Atomic (`-a … -P 37@114:720x1640`) is accepted, result on screen unconfirmed. Probe errors: `failed to get default timing`, `invalid panel type:2`, `te duration is not set` |
 | Touch, audio, modem, WiFi/BT, battery | ❌ Not attempted yet |
 | Watchdog | ✅ Fed by stock `mtk_wdt.ko` (no more resets) |
 | Known failed units | `getty@tty1` (no VT), `nftables`, `postmarketos-zram-swap` (modules not loaded). All harmless |
