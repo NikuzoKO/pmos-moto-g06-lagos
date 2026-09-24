@@ -4,7 +4,7 @@ Work-in-progress postmarketOS port for the Motorola Moto G06 / G06 Power
 (`lagos`, XT2535-x), MediaTek Helio G81 Ultra (**MT6768**, same die as the
 Galaxy A31's "Helio P65").
 
-## Status (2026-09-24)
+## Status (2026-09-24 evening)
 
 | Area | State |
 |---|---|
@@ -13,11 +13,12 @@ Galaxy A31's "Helio P65").
 | Vendor drivers | Stock first-stage vendor modules (156, from the stock `vendor_boot` ramdisk), loaded in stock `modules.load` order |
 | eMMC | ✅ `mmcblk0` + all partitions |
 | USB networking | ✅ CDC NCM gadget, phone at `172.16.42.1` |
-| initramfs → rootfs | ✅ `switch_root` into the pmOS rootfs, systemd starts, `sshd` listens on :22 |
-| SSH login | ⚠️ Auth succeeds (password and key), but **session setup hangs** (channel never opens). Suspect `pam_systemd`/logind, likely related to the missing devtmpfs in the GKI kernel |
-| Display | ❌ Screen stays on the "hello moto" splash (LK's last frame); no display driver loaded yet |
+| initramfs → rootfs | ✅ `switch_root` into the pmOS rootfs, systemd reaches a (degraded) running state |
+| SSH | ✅ `ssh user@172.16.42.1`. **~29s from reboot to SSH, no manual steps** (with plymouth masked, see below) |
+| Display | ⚠️ Vendor MTK DRM loads (`/dev/dri/card0`, a connector reports `connected`), but nothing draws yet. The screen stays on LK's "hello moto" frame |
 | Touch, audio, modem, WiFi/BT, battery | ❌ Not attempted yet |
 | Watchdog | ✅ Fed by stock `mtk_wdt.ko` (no more resets) |
+| Known failed units | `getty@tty1` (no VT), `nftables`, `postmarketos-zram-swap` (modules not loaded). All harmless |
 
 Tested on slot A only. **Slot B is unusable on the test unit**: it black-screen
 bootloops even with stock firmware, and its `system_b` is only ~11.6 MB.
@@ -56,9 +57,9 @@ pmaports/
   device-motorola-lagos/   deviceinfo (load addresses, header v4, cmdline), stock DTB table
   linux-motorola-lagos/    kernel-mtk build (currently NOT what boots, see above)
 initramfs-gki/
-  init.sh.patch            load_gki_modules in stage 1 + 150s debug-crash timer
+  init.sh.patch            load_gki_modules in stage 1 (only used with a separate initramfs-extra)
   init_2nd.sh.patch        load_gki_modules before setup_udev (the fix that made it boot)
-  init_functions.sh.patch  tmpfs+mdev /dev fallback, mdev after losetup, load_gki_modules, lagos_debug_crash
+  init_functions.sh.patch  tmpfs+mdev /dev fallback, mdev after losetup, load_gki_modules, lagos_debug_crash on fail_halt_boot
   gki.load                 stock modules.load order (156 modules)
   90-lagos-gki.files       mkinitfs extra-files list (modules + index files)
 tools/
@@ -89,6 +90,14 @@ They are not packaged yet.
 - **`init_boot_a` must be emptied.** Otherwise its ramdisk (Android
   first-stage init) is concatenated on top and runs instead of pmOS's `/init`.
 
+**Plymouth must be masked**
+- `plymouth-read-write.service` (`plymouth update-root-fs --read-write`)
+  hangs forever on the vendor MTK DRM device. It's a oneshot ordered before
+  `sysinit.target`, so dbus, logind and sshd start minutes late or not at all.
+  SSH then authenticates but the session never opens, because `pam_systemd`
+  waits for logind. Mask every `plymouth*.service` in `/etc/systemd/system`
+  (`ln -sf /dev/null …`). After that, sshd is up ~10s after `switch_root`.
+
 **Debugging without UART**
 - On an abnormal reset, LK's `kedump` copies the whole pstore/ramoops region
   into the **`expdb`** partition. Dump `expdb` (antumbra in download mode, or
@@ -96,10 +105,14 @@ They are not packaged yet.
   `tools/extract_pstore.py` on it to get the kernel console and pmsg logs.
   This is how every boot problem after the bootloader stage was found.
 - A clean hang (no crash) leaves nothing in expdb. The patched initramfs
-  crashes on purpose (`echo c > /proc/sysrq-trigger`) from `fail_halt_boot` or
-  after 150s in the initramfs, so that kedump fires. **Note:** the 150s timer
-  also fires while boot is paused in `pmos.debug-shell`. Either run
-  `pmos_continue_boot` within 150s or remove the timer.
+  crashes on purpose (`echo c > /proc/sysrq-trigger`) from `fail_halt_boot` so
+  that kedump fires. (An earlier 150s "still in initramfs" crash timer was
+  dropped: it also fired while paused in `pmos.debug-shell`, and even after
+  `switch_root`.)
+- Once the rootfs is up but unreachable, a debug-only systemd oneshot that
+  dumps `ps`, `/proc/1/{wchan,stack}` and `journalctl _PID=1` to
+  `/var/log`, read back later from the initramfs debug shell, is what found
+  the plymouth hang.
 - `pmos.debug-shell` on the cmdline gives a telnet shell on
   `172.16.42.1:23` before root is mounted (`tools/pmos-telnet.py`).
 - kaeru's `fastboot oem mem read` (CONFIG_FASTBOOT_MEM_COMMAND) can't read
@@ -130,6 +143,7 @@ They are not packaged yet.
    - install `initramfs-gki/gki.load` as `/usr/lib/modules/gki.load` and
      `90-lagos-gki.files` into `/usr/share/mkinitfs/files/`;
    - apply the three `initramfs-gki/*.patch` in `/usr/share/initramfs/`;
+   - mask plymouth: `for u in /usr/lib/systemd/system/plymouth*.service; do ln -sf /dev/null /etc/systemd/system/$(basename $u); done`;
    - `mkinitfs`.
 4. Flash `boot.img` → `boot_a`, `vendor_boot.img` → `vendor_boot_a`, an empty
    image → `init_boot_a`, and the pmOS disk image → `userdata` (pmOS finds
@@ -142,14 +156,15 @@ Extract them from your own device.
 
 ## Next steps
 
-1. Fix the SSH session hang (check `systemctl --failed`, logind/dbus, `/dev`
-   population after `switch_root` without devtmpfs; maybe add a udev-less
-   `/dev` handoff or rebuild GKI with DEVTMPFS).
-2. Test the plain (non-debug-shell) boot all the way to SSH.
-3. Display: find which stock second-stage vendor modules (vendor_dlkm) drive
-   the panel/DRM, and load them.
-4. Package the initramfs hack properly (a device-specific hook instead of
-   patching `postmarketos-initramfs`).
+1. Display: the MTK DRM driver is already loaded. Try a bare KMS client
+   (`kmscube`, `modetest`) to see whether it can scan out, then a compositor
+   (phosh/sxmo). Plymouth's hang on this device suggests DRM calls can block,
+   so start with `modetest -c` and watch for hangs.
+2. Touch, audio, WiFi/BT, modem: these need the second-stage vendor modules
+   (vendor_dlkm) and firmware.
+3. Package the initramfs hack and the plymouth masks properly (a
+   device-specific hook/package instead of patching `postmarketos-initramfs`).
+4. zram/nftables: load or ship the matching GKI modules.
 
 ## Prior art
 
