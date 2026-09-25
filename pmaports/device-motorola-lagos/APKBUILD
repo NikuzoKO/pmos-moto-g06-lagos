@@ -2,7 +2,7 @@
 maintainer=""
 pkgname=device-motorola-lagos
 pkgver=1
-pkgrel=1
+pkgrel=2
 pkgdesc="Motorola Moto G06"
 url="https://postmarketos.org"
 arch="aarch64"
@@ -18,6 +18,9 @@ source="
 	deviceinfo
 	modules-initfs
 	lagos-stock.dtb
+	lagos-backlight-resend
+	lagos-backlight-resend.service
+	90-lagos.preset
 	"
 options="!archcheck !check"
 
@@ -30,10 +33,18 @@ package() {
 
 	# Stock MTK dt_table blob from vendor_boot_a; LK reads it from vendor_boot's dtb section
 	install -Dm644 "$srcdir"/lagos-stock.dtb "$pkgdir"/usr/share/dtb/lagos-stock.dtb
+
+	install -Dm755 "$srcdir"/lagos-backlight-resend "$pkgdir"/usr/bin/lagos-backlight-resend
+	install -Dm644 "$srcdir"/lagos-backlight-resend.service \
+		"$pkgdir"/usr/lib/systemd/system/lagos-backlight-resend.service
+	install -Dm644 "$srcdir"/90-lagos.preset "$pkgdir"/usr/lib/systemd/system-preset/90-lagos.preset
 }
 
 sha512sums="
 7c84dd13c84655384d3d297a7c2b22d602a03160361c3849fecd598be6b997690e581a3e8dbc2856c814f239a396ae0ab6e114b91d115e407b0e4088e31d0707  deviceinfo
 e70bae17df23dcaaaea0e2d3616556f04baa23f8ee1357785c0f539bf97282d8ddff53953e155b72689bb73beb38c2da3d08de2a61e866684edfa10a6593885d  modules-initfs
 2f42fc7e5944464ffbb589a9cc1cf844041822c853506a3dee2a9f3948f83b7cd6df3ade39226489fad17acfd4c2ea981ccfaaf1ea7ec1a035c6b03895802eab  lagos-stock.dtb
+73bffbed86114800c1cd155a0808af75db8157827957f5e210499c5460ce15c0b609503e6c83ea005456a4aa80451d86da9fe86f6375a6d1e2d4140092f92edc  lagos-backlight-resend
+9f202acf1c9387cc5bd21a7e4877ca542cfe2752ead60fbd7ce32de00f7de7fcda7da38456bd1605c610c8f593a5da55958045052ee50d35edf34b2a34600eee  lagos-backlight-resend.service
+1a51644736123aa57a3afa4783b98db7e5906d7948645db4c48cdbfc728c0800fc00c9c95ddb123e4fc2cf13a6afe1764c9f522a5f75d2bbd053fda9df3e88cd  90-lagos.preset
 "

@@ -1,0 +1,10 @@
+[Unit]
+Description=Re-send panel brightness after the display powers up
+After=systemd-journald.service
+
+[Service]
+ExecStart=/usr/bin/lagos-backlight-resend
+Restart=always
+
+[Install]
+WantedBy=multi-user.target

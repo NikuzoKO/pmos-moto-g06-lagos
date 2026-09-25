@@ -1,0 +1,28 @@
+#!/bin/sh
+# The panel backlight is set by a DSI command, which the LED core only sends
+# when the brightness value changes. After the display powers up again it stays
+# dark, so re-send the current level once the panel is prepared.
+
+BRIGHTNESS=/sys/class/leds/lcd-backlight/brightness
+
+resend_brightness() {
+	current=$(cat "$BRIGHTNESS")
+	[ "$current" -gt 0 ] || return 0
+	if [ "$current" -gt 1 ]; then
+		nudged=$((current - 1))
+	else
+		nudged=$((current + 1))
+	fi
+	echo "$nudged" > "$BRIGHTNESS"
+	echo "$current" > "$BRIGHTNESS"
+}
+
+journalctl -k -f -n0 -o cat | while read -r line; do
+	case "$line" in
+	*mtk_drm_crtc_atomic_resume*)
+		# panel prepare takes ~220ms after this line
+		sleep 0.5
+		resend_brightness
+		;;
+	esac
+done

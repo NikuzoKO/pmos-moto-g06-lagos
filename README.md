@@ -156,8 +156,9 @@ Extract them from your own device.
 
 ## Next steps
 
-1. Display: scanout works. Next: a hook that re-sends the brightness after
-   the panel powers on, then a compositor (phosh/sxmo). Userspace brightness
+1. Display: scanout works, and `lagos-backlight-resend.service` (in the device
+   package) re-sends the brightness 0.5s after each `mtk_drm_crtc_atomic_resume`
+   kernel log line. Next: a compositor (phosh/sxmo). Userspace brightness
    control needs a bridge, since the only knob is the LED class device and
    there is no `/sys/class/backlight`.
 2. Touch, audio, WiFi/BT, modem: these need the second-stage vendor modules
