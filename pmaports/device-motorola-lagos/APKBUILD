@@ -2,7 +2,7 @@
 maintainer=""
 pkgname=device-motorola-lagos
 pkgver=1
-pkgrel=2
+pkgrel=3
 pkgdesc="Motorola Moto G06"
 url="https://postmarketos.org"
 arch="aarch64"
@@ -21,6 +21,9 @@ source="
 	lagos-backlight-resend
 	lagos-backlight-resend.service
 	90-lagos.preset
+	lagos-mknod
+	00-lagos-mknod.rules
+	lagos-touch.service
 	"
 options="!archcheck !check"
 
@@ -38,6 +41,11 @@ package() {
 	install -Dm644 "$srcdir"/lagos-backlight-resend.service \
 		"$pkgdir"/usr/lib/systemd/system/lagos-backlight-resend.service
 	install -Dm644 "$srcdir"/90-lagos.preset "$pkgdir"/usr/lib/systemd/system-preset/90-lagos.preset
+
+	install -Dm755 "$srcdir"/lagos-mknod "$pkgdir"/usr/bin/lagos-mknod
+	install -Dm644 "$srcdir"/00-lagos-mknod.rules "$pkgdir"/usr/lib/udev/rules.d/00-lagos-mknod.rules
+
+	install -Dm644 "$srcdir"/lagos-touch.service "$pkgdir"/usr/lib/systemd/system/lagos-touch.service
 }
 
 sha512sums="
@@ -46,5 +54,8 @@ e70bae17df23dcaaaea0e2d3616556f04baa23f8ee1357785c0f539bf97282d8ddff53953e155b72
 2f42fc7e5944464ffbb589a9cc1cf844041822c853506a3dee2a9f3948f83b7cd6df3ade39226489fad17acfd4c2ea981ccfaaf1ea7ec1a035c6b03895802eab  lagos-stock.dtb
 73bffbed86114800c1cd155a0808af75db8157827957f5e210499c5460ce15c0b609503e6c83ea005456a4aa80451d86da9fe86f6375a6d1e2d4140092f92edc  lagos-backlight-resend
 9f202acf1c9387cc5bd21a7e4877ca542cfe2752ead60fbd7ce32de00f7de7fcda7da38456bd1605c610c8f593a5da55958045052ee50d35edf34b2a34600eee  lagos-backlight-resend.service
-1a51644736123aa57a3afa4783b98db7e5906d7948645db4c48cdbfc728c0800fc00c9c95ddb123e4fc2cf13a6afe1764c9f522a5f75d2bbd053fda9df3e88cd  90-lagos.preset
+fd4838b41a35b5d82c7b3aca9c9464587b61f067a4a69e986288d81799454497a5d49789e2c5bb614b875ac6bf7d4cf57c173fda7fb82f1268465ac9ee0bbe77  90-lagos.preset
+e1bbf1b1defadb6da17845b27e5d07d56eb6bc1bcf2d7ce2d2f583c7053c244e4c04058a846f48f8a01625d26066d06caaf4e0ffc9b3b95d7c5b3c5148d36efe  lagos-mknod
+427ee0fbea1aab71d6e7e633a4962bfb21807d2fb8caaa968a378fbb22150879f01ac1bc3b1160495df5ee448805faad027fa1078b8955cc416cb73a6fc21e66  00-lagos-mknod.rules
+c35f1b121d9ab26cc109581fed5c744c8c4959cec1bb645e779bdac6d4aaedd97ec500bf3d9e8ccf80ef863163a5e8e22b4831709e2bcac44e28f875ec904eb2  lagos-touch.service
 "

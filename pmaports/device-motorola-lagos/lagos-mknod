@@ -1,0 +1,16 @@
+#!/bin/sh
+# The stock GKI kernel has no devtmpfs, so /dev is a tmpfs that mdev fills once
+# at boot. udev doesn't create device nodes itself: make them for anything
+# that shows up later, before udev applies owner/group/mode to them.
+
+[ -n "$DEVNAME" ] && [ -n "$MAJOR" ] || exit 0
+[ -e "$DEVNAME" ] && exit 0
+
+case "$SUBSYSTEM" in
+block) node_type=b ;;
+*) node_type=c ;;
+esac
+
+mkdir -p "${DEVNAME%/*}"
+mknod -m 600 "$DEVNAME" "$node_type" "$MAJOR" "$MINOR"
+exit 0

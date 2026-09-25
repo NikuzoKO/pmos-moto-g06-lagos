@@ -1,0 +1,3 @@
+# No devtmpfs on the stock GKI kernel: create/remove device nodes ourselves
+ACTION=="add", ENV{DEVNAME}=="?*", ENV{MAJOR}=="?*", PROGRAM="/usr/bin/lagos-mknod"
+ACTION=="remove", ENV{DEVNAME}=="/dev/?*", RUN+="/bin/rm -f $env{DEVNAME}"

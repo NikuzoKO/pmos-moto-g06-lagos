@@ -1,1 +1,2 @@
 enable lagos-backlight-resend.service
+enable lagos-touch.service

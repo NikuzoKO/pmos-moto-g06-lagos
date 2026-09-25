@@ -1,0 +1,17 @@
+[Unit]
+Description=Load the Chipone TDDI touchscreen driver (stock vendor module)
+# The vendor module and its firmware aren't redistributable: copy them in
+# from the phone's own vendor_dlkm/vendor images (see README)
+ConditionPathExists=/usr/local/lib/lagos/chipone_tddi.ko
+ConditionPathExists=/usr/lib/firmware/chipone_firmware.bin
+After=systemd-udevd.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# No ExecStop on purpose: the driver leaves its display notifier registered
+# on rmmod, and the next panel power change oopses in freed module memory
+ExecStart=/usr/sbin/insmod /usr/local/lib/lagos/chipone_tddi.ko
+
+[Install]
+WantedBy=multi-user.target

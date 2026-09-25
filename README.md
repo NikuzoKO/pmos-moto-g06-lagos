@@ -154,6 +154,14 @@ They are not packaged yet.
 Stock firmware blobs and the vendor `.ko` files are not redistributed here.
 Extract them from your own device.
 
+6. Touch (optional): copy `chipone_tddi.ko` from your `vendor_dlkm` image to
+   `/usr/local/lib/lagos/`, and `chipone_firmware.bin` + `chipone_limit.bin`
+   from your `vendor` image's `firmware/` to `/usr/lib/firmware/`.
+   `lagos-touch.service` insmods it at boot (it's skipped when the files are
+   missing). The panel must be powered when the driver probes; LK leaves it on,
+   so boot time is fine. **Never rmmod it**: it leaves its display notifier
+   registered, and the next panel power change oopses.
+
 ## Next steps
 
 1. Display: scanout works, and `lagos-backlight-resend.service` (in the device
@@ -161,8 +169,10 @@ Extract them from your own device.
    kernel log line. Next: a compositor (phosh/sxmo). Userspace brightness
    control needs a bridge, since the only knob is the LED class device and
    there is no `/sys/class/backlight`.
-2. Touch, audio, WiFi/BT, modem: these need the second-stage vendor modules
-   (vendor_dlkm) and firmware.
+2. Touch works: the Chipone ICNL9916X TDDI on spi2, verified across panel
+   off/on (see step 6 above). There's no devtmpfs, so `00-lagos-mknod.rules`
+   creates nodes for hotplugged devices. Audio, WiFi/BT, and the modem still
+   need their second-stage vendor modules (vendor_dlkm) and firmware.
 3. Package the initramfs hack and the plymouth masks properly (a
    device-specific hook/package instead of patching `postmarketos-initramfs`).
 4. zram/nftables: load or ship the matching GKI modules.
