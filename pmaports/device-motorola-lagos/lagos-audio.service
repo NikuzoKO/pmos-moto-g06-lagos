@@ -1,0 +1,20 @@
+[Unit]
+Description=Load the MT6768/MT6358 sound card (stock vendor modules)
+# The vendor_dlkm modules aren't redistributable: install them under
+# /usr/lib/modules/<stock release>/ from your own phone (see README)
+ConditionPathExists=/usr/lib/modules/%v/vendor_dlkm/mt6768-mt6358.ko
+After=systemd-udevd.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# The codec defers until the PMIC eFuse nvmem provider exists, and the card
+# waits for the BT CVSD DAI; the FS1800 speaker amp loads its firmware when
+# "FSAMP Switch" is turned on, so it can come up before the firmware is read
+ExecStart=/usr/sbin/modprobe -a nvmem-mt635x-efuse mtk-sp-spk-amp mtk-btcvsd mt6768-mt6358
+# Wait for the card's control node, then set the speaker route
+ExecStartPost=/bin/sh -c 'for i in $(seq 50); do [ -e /dev/snd/controlC0 ] && break; sleep 0.1; done'
+ExecStartPost=/usr/bin/lagos-audio-setup
+
+[Install]
+WantedBy=multi-user.target

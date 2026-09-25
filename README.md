@@ -161,6 +161,16 @@ Extract them from your own device.
    missing). The panel must be powered when the driver probes; LK leaves it on,
    so boot time is fine. **Never rmmod it**: it leaves its display notifier
    registered, and the next panel power change oopses.
+7. Audio and the other second-stage drivers: build one module tree for the
+   stock kernel release from the first-stage modules (`kernel/`), your
+   `system_dlkm` (`system_dlkm/`) and `vendor_dlkm` (`vendor_dlkm/`, minus the 12
+   byte-identical first-stage duplicates), run `depmod -b <root> <release>` and
+   copy it to `/usr/lib/modules/<release>/` on the phone. Blacklist every
+   second-stage module in `/etc/modprobe.d/` so udev never autoloads camera,
+   GPU, sensor hub or modem drivers by alias; explicit `modprobe` still works.
+   Copy `spk-fs1800.bin` from your `vendor` firmware to `/usr/lib/firmware/`.
+   `lagos-audio.service` then loads the card and `lagos-audio-setup` routes it
+   to the bottom speaker.
 
 ## Next steps
 
@@ -171,8 +181,18 @@ Extract them from your own device.
    there is no `/sys/class/backlight`.
 2. Touch works: the Chipone ICNL9916X TDDI on spi2, verified across panel
    off/on (see step 6 above). There's no devtmpfs, so `00-lagos-mknod.rules`
-   creates nodes for hotplugged devices. Audio, WiFi/BT, and the modem still
-   need their second-stage vendor modules (vendor_dlkm) and firmware.
+   creates nodes for hotplugged devices.
+3. Audio: the bottom speaker works through PipeWire (step 7). The FS1800 is a
+   two-channel analog amp fed by the MT6358 headphone outputs in "LoudSPK"
+   mode, and that mode's level is "Lineout Volume". The codec volumes read
+   back 0x1f (mute) while powered down, so ALSA state save/restore is skipped
+   and the route is set explicitly. **Never let userspace open the BTCVSD PCM
+   (device 30)** while the connectivity subsystem is down: it trips a Device
+   APC violation and the kernel BUG()s. `71-lagos-audio.rules` makes every PCM
+   except Playback_1/Capture_1 root-only, and PipeWire gets a fixed sink,
+   because its ALSA monitor skips this card (no per-PCM /proc/asound entries).
+   Still to do: earpiece, headset jack switching, microphones.
+4. WiFi/BT and the modem still need their vendor modules and firmware.
 3. Package the initramfs hack and the plymouth masks properly (a
    device-specific hook/package instead of patching `postmarketos-initramfs`).
 4. zram/nftables: load or ship the matching GKI modules.

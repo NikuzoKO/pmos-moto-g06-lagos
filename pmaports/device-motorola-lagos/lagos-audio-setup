@@ -1,0 +1,27 @@
+#!/bin/sh
+# Route Playback_1 to the bottom speaker. The FS1800 dual-channel analog amp
+# takes the MT6358 headphone outputs in "LoudSPK" mode, and that mode's level
+# comes from "Lineout Volume". The codec's volume controls read back the live
+# register (0x1f = mute) while powered down, so a stored ALSA state would
+# restore them muted: set everything explicitly instead of using alsactl.
+# Gain indices count down: 0 is about +8 dB, 8 about 0 dB, 18 is -10 dB.
+
+set -e
+
+mixer() {
+	amixer -c0 -q cset name="$1" "$2"
+}
+
+mixer "ADDA_DL_GAIN" 63311
+mixer "DAC In Mux" "Normal Path"
+mixer "ADDA_DL_CH1 DL1_CH1" on
+mixer "ADDA_DL_CH2 DL1_CH2" on
+mixer "HPL Mux" "LoudSPK Playback"
+mixer "HPR Mux" "LoudSPK Playback"
+mixer "LOL Mux" "Open"
+mixer "RCV Mux" "Open"
+mixer "Ext_Speaker_Amp Switch" on
+mixer "Headset Volume" 8,8
+mixer "Lineout Volume" 8,8
+# Loads spk-fs1800.bin on first use and powers the amp up (MUSIC scene)
+mixer "FSAMP Switch" On

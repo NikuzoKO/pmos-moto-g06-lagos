@@ -1,0 +1,6 @@
+# Opening the BTCVSD PCM (device 30) while the connectivity subsystem is down
+# reads PERISYS_CONN, trips a Device APC violation and the vendor code BUG()s.
+# The hostless FM/speech PCMs go through CONN/the modem too. Only let users
+# open Playback_1 (speaker/headset) and Capture_1 (mics); keep the rest root-only.
+# Runs after 70-uaccess.rules so the seat ACL tag can be taken off again.
+SUBSYSTEM=="sound", KERNEL=="pcmC0D*", KERNEL!="pcmC0D0p|pcmC0D4c", GROUP="root", MODE="0600", TAG-="uaccess"
