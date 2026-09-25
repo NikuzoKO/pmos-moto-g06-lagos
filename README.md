@@ -4,7 +4,7 @@ Work-in-progress postmarketOS port for the Motorola Moto G06 / G06 Power
 (`lagos`, XT2535-x), MediaTek Helio G81 Ultra (**MT6768**, same die as the
 Galaxy A31's "Helio P65").
 
-## Status (2026-09-24 evening)
+## Status (2026-09-24 night)
 
 | Area | State |
 |---|---|
@@ -15,7 +15,7 @@ Galaxy A31's "Helio P65").
 | USB networking | ✅ CDC NCM gadget, phone at `172.16.42.1` |
 | initramfs → rootfs | ✅ `switch_root` into the pmOS rootfs, systemd reaches a (degraded) running state |
 | SSH | ✅ `ssh user@172.16.42.1`. **~29s from reboot to SSH, no manual steps** (with plymouth masked, see below) |
-| Display | ⚠️ Vendor MTK DRM loads (driver `mediatek`, DSI-1 720x1640 connected). `modetest -M mediatek -s 32@114:720x1640-60` sets the mode and the backlight stays lit, but the screen goes black: no frame is ever produced (`frame:0`, page flips never complete). Atomic (`-a … -P 37@114:720x1640`) is accepted, result on screen unconfirmed. Probe errors: `failed to get default timing`, `invalid panel type:2`, `te duration is not set` |
+| Display | ✅ KMS scanout works (verified with modetest color bars). Vendor MTK DRM (`mediatek`, DSI-1 720x1640, Tianma icnl9916x panel). **Gotcha:** the backlight is a DSI command (`tianma_setbacklight_cmdq`), and the LED core only sends it when `/sys/class/leds/lcd-backlight/brightness` *changes*. After a modeset re-powers the panel, write a different brightness value or the screen stays dark. No fbdev (`/dev/fb0`), no `/sys/class/backlight`. Debug: `echo mobile:on > /sys/kernel/debug/mtkfb; echo diagnose > /sys/kernel/debug/mtkfb` dumps the full DDP state to dmesg |
 | Touch, audio, modem, WiFi/BT, battery | ❌ Not attempted yet |
 | Watchdog | ✅ Fed by stock `mtk_wdt.ko` (no more resets) |
 | Known failed units | `getty@tty1` (no VT), `nftables`, `postmarketos-zram-swap` (modules not loaded). All harmless |
@@ -156,10 +156,10 @@ Extract them from your own device.
 
 ## Next steps
 
-1. Display: the MTK DRM driver is already loaded. Try a bare KMS client
-   (`kmscube`, `modetest`) to see whether it can scan out, then a compositor
-   (phosh/sxmo). Plymouth's hang on this device suggests DRM calls can block,
-   so start with `modetest -c` and watch for hangs.
+1. Display: scanout works. Next: a hook that re-sends the brightness after
+   the panel powers on, then a compositor (phosh/sxmo). Userspace brightness
+   control needs a bridge, since the only knob is the LED class device and
+   there is no `/sys/class/backlight`.
 2. Touch, audio, WiFi/BT, modem: these need the second-stage vendor modules
    (vendor_dlkm) and firmware.
 3. Package the initramfs hack and the plymouth masks properly (a
