@@ -1,0 +1,495 @@
+From 2735077f3d8de091fcd0aabd3fa65ba39f9b5621 Mon Sep 17 00:00:00 2001
+From: nikuzo <buelaniki@gmail.com>
+Date: Sat, 26 Sep 2026 20:10:40 -0300
+Subject: [PATCH] Add a pattern lock mode (-P / --pattern)
+
+Swipe through a visible 3x3 grid of dots, Android style, instead of
+tapping invisible quadrants. The passcode uses the 3x3 grid's digits
+(1 = topleft, 9 = bottomright); crossing a dot halfway between two
+connected ones picks it up too. A wrong pattern shows in red for a second
+and counts towards the deep lock, like a wrong touch passcode.
+---
+ src/draw.rs             |  60 ++++++++++++-
+ src/main.rs             |  75 ++++++++++++++--
+ src/pattern.rs          | 185 ++++++++++++++++++++++++++++++++++++++++
+ src/wayland_protocol.rs |  27 +++++-
+ 4 files changed, 336 insertions(+), 11 deletions(-)
+ create mode 100644 src/pattern.rs
+
+diff --git a/src/draw.rs b/src/draw.rs
+index 3a5a3b1..70f87f4 100644
+--- a/src/draw.rs
++++ b/src/draw.rs
+@@ -38,7 +38,9 @@ impl State {
+         )
+         .unwrap();
+         let context = cairo::Context::new(&surface).unwrap();
+-        if self.touch_state.is_some() && self.touch_state.as_ref().unwrap().permalocked() {
++        let permalocked = self.touch_state.as_ref().is_some_and(|state| state.permalocked())
++            || self.pattern.as_ref().is_some_and(|pattern| pattern.permalocked());
++        if permalocked {
+             context.set_source_rgb(1.0, 0.0, 0.0);
+         } else if self.inverted {
+             context.set_source_rgb(1.0, 1.0, 1.0);
+@@ -77,12 +79,23 @@ impl State {
+         layout.set_font_description(Some(&self.fontdesc_time));
+         layout.set_text(&timestring);
+         let (layout_w, layout_h) = layout.pixel_size();
++        // in pattern mode the dots take the lower part of the screen
++        let time_center_y = if self.pattern.is_some() {
++            init_h as f64 * 0.28
++        } else {
++            init_h as f64 / 2.0
++        };
+         context.move_to(
+             (init_w as f64 / 2.0) - (layout_w as f64 / 2.0),
+-            (init_h as f64 / 2.0) - (layout_h as f64 / 2.0),
++            time_center_y - (layout_h as f64 / 2.0),
+         );
+         pangocairo::functions::show_layout(&context, &layout);
+ 
++        if !permalocked {
++            self.draw_pattern(&context);
++        }
++
++        drop(context);
+         let pool = self.wl_shm.as_ref().unwrap().create_pool(
+             file.as_fd(),
+             (init_w * init_h * 4) as i32,
+@@ -117,4 +130,47 @@ impl State {
+ 
+         pool.destroy();
+     }
++
++    /// Dots, the path swiped so far and a line to the finger (all in surface
++    /// coordinates, scaled to the buffer)
++    fn draw_pattern(&self, context: &cairo::Context) {
++        let Some(pattern) = self.pattern.as_ref() else {
++            return;
++        };
++        let scale = self.scale as f64;
++        let spacing = pattern.spacing() * scale;
++        if pattern.failed() {
++            context.set_source_rgb(0.9, 0.2, 0.2);
++        } else {
++            context.set_source_rgb(1.0, 1.0, 1.0);
++        }
++
++        let points = pattern.path_points();
++        if !points.is_empty() {
++            context.set_line_width(spacing * 0.035);
++            context.set_line_cap(cairo::LineCap::Round);
++            context.set_line_join(cairo::LineJoin::Round);
++            context.move_to(points[0].0 * scale, points[0].1 * scale);
++            for (x, y) in points.iter().skip(1) {
++                context.line_to(x * scale, y * scale);
++            }
++            if let Some((x, y)) = pattern.finger() {
++                context.line_to(x * scale, y * scale);
++            }
++            context.stroke().unwrap();
++        }
++
++        for (index, (x, y)) in pattern.dots().iter().enumerate() {
++            let (x, y) = (x * scale, y * scale);
++            context.new_sub_path();
++            context.arc(x, y, spacing * 0.05, 0.0, std::f64::consts::TAU);
++            context.fill().unwrap();
++            if pattern.is_visited(index) {
++                context.set_line_width(spacing * 0.02);
++                context.new_sub_path();
++                context.arc(x, y, spacing * 0.16, 0.0, std::f64::consts::TAU);
++                context.stroke().unwrap();
++            }
++        }
++    }
+ }
+diff --git a/src/main.rs b/src/main.rs
+index 3d7cf23..72350b0 100644
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -12,7 +12,9 @@ use poller::Poller;
+ use wayland_protocol::init_wayland;
+ use wayland_protocol::TouchDown;
+ 
++mod pattern;
+ mod touch_pass;
++use pattern::{Outcome, PatternState};
+ use touch_pass::TouchState;
+ 
+ #[derive(Copy, Clone, PartialEq)]
+@@ -32,6 +34,7 @@ fn main() {
+     let mut statuscommand: Option<Vec<String>> = None;
+     let mut parsearg = ParseArg::None;
+     let mut resolution = 2;
++    let mut pattern_mode = false;
+     let mut tries: u16 = 10;
+     let mut deeplocktime = time::Duration::from_secs(20);
+     let mut paranoid = false;
+@@ -53,6 +56,7 @@ fn main() {
+             "-2" => resolution = 2,
+             "-3" => resolution = 3,
+             "-4" => resolution = 4,
++            "-P" | "--pattern" => pattern_mode = true,
+             "-h" | "--help" => {
+                 eprintln!("Options:");
+                 eprintln!(
+@@ -71,6 +75,9 @@ fn main() {
+                 eprintln!(
+                     " -3                              3x3 touch grid (1=topleft, 9=bottomright)"
+                 );
++                eprintln!(
++                    " -P / --pattern                  Pattern lock: swipe through a visible 3x3 grid of dots (1=topleft, 9=bottomright)"
++                );
+                 eprintln!(
+                     " -4                              4x4 touch grid (0=topleft, f=bottomright)"
+                 );
+@@ -164,13 +171,24 @@ fn main() {
+     way_state.draw(); //initial frame
+     way_state.lock();
+     let mut previous_down: Option<TouchDown> = None;
+-    way_state.touch_state = Some(TouchState::new(
+-        way_state.width.unwrap(),
+-        way_state.height.unwrap(),
+-        passcode.as_deref(),
+-        resolution,
+-        tries,
+-    ));
++    if pattern_mode {
++        way_state.pattern = Some(PatternState::new(
++            way_state.width.unwrap(),
++            way_state.height.unwrap(),
++            passcode.as_deref(),
++            tries,
++        ));
++        way_state.redraw = true;
++    } else {
++        way_state.touch_state = Some(TouchState::new(
++            way_state.width.unwrap(),
++            way_state.height.unwrap(),
++            passcode.as_deref(),
++            resolution,
++            tries,
++        ));
++    }
++    let mut clear_pattern_at: Option<chrono::DateTime<chrono::Local>> = None;
+ 
+     //single blocking dispatch before the main loop
+     event_queue.blocking_dispatch(&mut way_state).unwrap();
+@@ -229,7 +247,13 @@ fn main() {
+                         if way_state.debug {
+                             eprintln!("deeplock state timed-out");
+                         }
+-                        way_state.touch_state.as_mut().unwrap().reset();
++                        if let Some(touch_state) = way_state.touch_state.as_mut() {
++                            touch_state.reset();
++                        }
++                        if let Some(pattern) = way_state.pattern.as_mut() {
++                            pattern.reset();
++                            pattern.clear();
++                        }
+                         way_state.redraw = true;
+                         reset_touchstate = None;
+                     }
+@@ -237,6 +261,41 @@ fn main() {
+                 if time_changed || status_changed {
+                     way_state.redraw = true;
+                 }
++                if let Some(clear_time) = clear_pattern_at.as_ref() {
++                    if time >= *clear_time {
++                        if let Some(pattern) = way_state.pattern.as_mut() {
++                            pattern.clear();
++                        }
++                        clear_pattern_at = None;
++                        way_state.redraw = true;
++                    }
++                }
++            }
++
++            if let Some(outcome) = way_state.pattern_outcome.take() {
++                match outcome {
++                    Outcome::Valid => {
++                        if way_state.debug {
++                            eprintln!("pattern accepted");
++                        }
++                        break; //exit main loop
++                    }
++                    Outcome::Invalid => {
++                        let pattern = way_state.pattern.as_ref().unwrap();
++                        if reset_touchstate.is_none() && pattern.permalocked() {
++                            //too many wrong patterns: deep lock timeout, as for touch passcodes
++                            reset_touchstate = Some(chrono::Local::now() + deeplocktime);
++                            if way_state.debug {
++                                eprintln!("entering deeplock state until {:?}", reset_touchstate);
++                            }
++                            if paranoid {
++                                deeplocktime = deeplocktime * 2;
++                            }
++                        }
++                        //leave the failed pattern on screen for a moment
++                        clear_pattern_at = Some(chrono::Local::now() + chrono::TimeDelta::seconds(1));
++                    }
++                }
+             }
+ 
+             if let Some(last_down) = way_state.last_down.as_ref() {
+diff --git a/src/pattern.rs b/src/pattern.rs
+new file mode 100644
+index 0000000..c7c8e9e
+--- /dev/null
++++ b/src/pattern.rs
+@@ -0,0 +1,185 @@
++// Pattern lock: a visible 3x3 grid of dots, unlocked by swiping through them in
++// order. The passcode uses the same digits as the 3x3 touch grid
++// (1 = topleft, 5 = center, 9 = bottomright).
++
++const GRID: usize = 3;
++
++pub enum Outcome {
++    Valid,
++    Invalid,
++}
++
++#[derive(Clone, Debug)]
++pub struct PatternState {
++    passcode: Vec<u8>,
++    path: Vec<u8>,
++    finger: Option<(f64, f64)>,
++    dots: [(f64, f64); GRID * GRID],
++    spacing: f64,
++    tries: usize,
++    max_tries: u16,
++    failed: bool,
++}
++
++/// Like Android: going straight from one dot to another across a dot halfway
++/// between them picks that dot up too, if it isn't part of the path yet
++fn push_dot(path: &mut Vec<u8>, code: u8) {
++    if let Some(&previous) = path.last() {
++        let (previous_row, previous_column) = ((previous - 1) / 3, (previous - 1) % 3);
++        let (row, column) = ((code - 1) / 3, (code - 1) % 3);
++        if (previous_row + row) % 2 == 0 && (previous_column + column) % 2 == 0 {
++            let middle = (previous_row + row) / 2 * 3 + (previous_column + column) / 2 + 1;
++            if middle != previous && middle != code && !path.contains(&middle) {
++                path.push(middle);
++            }
++        }
++    }
++    path.push(code);
++}
++
++/// The passcode as it gets swiped: "7593" crosses 6 on the way from 9 to 3,
++/// so it means 7-5-9-6-3, same as "75963"
++fn read_passcode(passcode: &str) -> Vec<u8> {
++    let mut path = Vec::new();
++    for character in passcode.chars() {
++        let code = match character.to_digit(10) {
++            Some(digit @ 1..=9) => digit as u8,
++            _ => panic!("invalid pattern passcode: use digits 1 (topleft) to 9 (bottomright)"),
++        };
++        if path.contains(&code) {
++            panic!("invalid pattern passcode: a dot can only be used once");
++        }
++        push_dot(&mut path, code);
++    }
++    path
++}
++
++impl PatternState {
++    pub fn new(width: i32, height: i32, passcode: Option<&str>, max_tries: u16) -> Self {
++        let mut state = Self {
++            passcode: read_passcode(passcode.expect("pattern mode needs PEANUTBUTTER_PASSCODE")),
++            path: Vec::new(),
++            finger: None,
++            dots: [(0.0, 0.0); GRID * GRID],
++            spacing: 0.0,
++            tries: 0,
++            max_tries,
++            failed: false,
++        };
++        state.resize(width, height);
++        state
++    }
++
++    /// Lay the grid out in the lower part of the screen, below the clock
++    pub fn resize(&mut self, width: i32, height: i32) {
++        let (width, height) = (width as f64, height as f64);
++        self.spacing = (width * 0.28).min(height * 0.16);
++        let center_x = width / 2.0;
++        let center_y = height * 0.66;
++        for (index, dot) in self.dots.iter_mut().enumerate() {
++            let column = (index % GRID) as f64 - 1.0;
++            let row = (index / GRID) as f64 - 1.0;
++            *dot = (center_x + column * self.spacing, center_y + row * self.spacing);
++        }
++    }
++
++    pub fn dots(&self) -> &[(f64, f64)] {
++        &self.dots
++    }
++
++    pub fn spacing(&self) -> f64 {
++        self.spacing
++    }
++
++    /// Dot positions along the current path, in order
++    pub fn path_points(&self) -> Vec<(f64, f64)> {
++        self.path
++            .iter()
++            .map(|code| self.dots[(*code - 1) as usize])
++            .collect()
++    }
++
++    pub fn finger(&self) -> Option<(f64, f64)> {
++        self.finger
++    }
++
++    pub fn is_visited(&self, index: usize) -> bool {
++        self.path.contains(&((index + 1) as u8))
++    }
++
++    pub fn failed(&self) -> bool {
++        self.failed
++    }
++
++    pub fn begin(&mut self, x: f64, y: f64) {
++        if self.permalocked() {
++            return;
++        }
++        self.path.clear();
++        self.failed = false;
++        self.motion(x, y);
++    }
++
++    pub fn motion(&mut self, x: f64, y: f64) {
++        if self.permalocked() {
++            return;
++        }
++        self.finger = Some((x, y));
++        let hit_radius = self.spacing * 0.3;
++        let hit = self.dots.iter().position(|(dot_x, dot_y)| {
++            (dot_x - x).hypot(dot_y - y) <= hit_radius
++        });
++        if let Some(index) = hit {
++            let code = (index + 1) as u8;
++            if !self.path.contains(&code) {
++                push_dot(&mut self.path, code);
++            }
++        }
++    }
++
++    /// Finger lifted: check the pattern. Nothing happens for a stray tap
++    pub fn end(&mut self) -> Option<Outcome> {
++        self.finger = None;
++        if self.permalocked() || self.path.is_empty() {
++            self.path.clear();
++            return None;
++        }
++        if self.path == self.passcode {
++            return Some(Outcome::Valid);
++        }
++        self.failed = true;
++        if self.max_tries != 0 {
++            self.tries += 1;
++        }
++        Some(Outcome::Invalid)
++    }
++
++    /// Clear a failed pattern from the screen
++    pub fn clear(&mut self) {
++        self.path.clear();
++        self.failed = false;
++    }
++
++    pub fn permalocked(&self) -> bool {
++        self.max_tries != 0 && self.tries >= self.max_tries as usize
++    }
++
++    pub fn reset(&mut self) {
++        self.tries = 0;
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::read_passcode;
++
++    #[test]
++    fn passcode_picks_up_crossed_dots() {
++        assert_eq!(read_passcode("7593"), vec![7, 5, 9, 6, 3]);
++        assert_eq!(read_passcode("75963"), vec![7, 5, 9, 6, 3]);
++        assert_eq!(read_passcode("13"), vec![1, 2, 3]);
++        assert_eq!(read_passcode("19"), vec![1, 5, 9]);
++        assert_eq!(read_passcode("213"), vec![2, 1, 3]);
++        assert_eq!(read_passcode("16"), vec![1, 6]);
++    }
++}
+diff --git a/src/wayland_protocol.rs b/src/wayland_protocol.rs
+index ce66979..8bdbec9 100644
+--- a/src/wayland_protocol.rs
++++ b/src/wayland_protocol.rs
+@@ -30,6 +30,7 @@ use wayland_client::protocol::wl_keyboard;
+ use wayland_client::protocol::wl_shm;
+ use wayland_client::protocol::wl_shm_pool;
+ 
++use crate::pattern::{Outcome, PatternState};
+ use crate::touch_pass::TouchState;
+ use chrono::{DateTime, Local};
+ 
+@@ -71,6 +72,8 @@ pub struct State {
+     zxdg_manager: Option<zxdg_output_manager_v1::ZxdgOutputManagerV1>,
+     pub wl_shm: Option<wl_shm::WlShm>,
+     pub touch_state: Option<TouchState>,
++    pub pattern: Option<PatternState>, // pattern mode, replaces touch_state
++    pub pattern_outcome: Option<Outcome>, // set when a pattern is completed
+     pub status: Arc<Mutex<String>>,
+     pub statushash: Option<u64>, //hash of last status
+     pub time: Option<DateTime<Local>>,
+@@ -208,7 +211,24 @@ impl Dispatch<wl_touch::WlTouch, ()> for State {
+     ) {
+         match event {
+             wl_touch::Event::Down { serial, x, y, .. } => {
+-                state.last_down = Some(TouchDown { serial, x, y })
++                if let Some(pattern) = state.pattern.as_mut() {
++                    pattern.begin(x, y);
++                    state.redraw = true;
++                } else {
++                    state.last_down = Some(TouchDown { serial, x, y })
++                }
++            }
++            wl_touch::Event::Motion { x, y, .. } => {
++                if let Some(pattern) = state.pattern.as_mut() {
++                    pattern.motion(x, y);
++                    state.redraw = true;
++                }
++            }
++            wl_touch::Event::Up { .. } => {
++                if let Some(pattern) = state.pattern.as_mut() {
++                    state.pattern_outcome = pattern.end();
++                    state.redraw = true;
++                }
+             }
+             _ => {}
+         }
+@@ -339,6 +359,8 @@ pub fn init_wayland(
+         zxdg_manager: None,
+         wl_shm: None,
+         touch_state: None,
++        pattern: None,
++        pattern_outcome: None,
+         status,
+         statushash: None,
+         time: None,
+@@ -413,6 +435,9 @@ impl Dispatch<zxdg_output_v1::ZxdgOutputV1, ()> for State {
+             zxdg_output_v1::Event::LogicalSize { width, height } => {
+                 state.width = Some(width);
+                 state.height = Some(height);
++                if let Some(pattern) = state.pattern.as_mut() {
++                    pattern.resize(width, height);
++                }
+                 if let Some(touch_state) = state.touch_state.as_mut() {
+                     touch_state.resize(width, height);
+                 }
+-- 
+2.55.0
+

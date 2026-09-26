@@ -1,0 +1,7 @@
+#!/bin/sh
+# sxmo starts peanutbutter without options or a passcode: use the pattern
+# lock (swipe through a 3x3 grid of dots, 1 = top-left, 9 = bottom-right)
+# and read the passcode from ~/.config/sxmo/peanutbutter-passcode.
+PEANUTBUTTER_PASSCODE="$(cat "$HOME/.config/sxmo/peanutbutter-passcode" 2>/dev/null)"
+export PEANUTBUTTER_PASSCODE
+exec /usr/bin/peanutbutter -P "$@"
