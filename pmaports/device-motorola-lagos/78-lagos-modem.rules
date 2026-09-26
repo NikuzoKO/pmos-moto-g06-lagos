@@ -1,0 +1,11 @@
+# The modem's AT channel is a CCCI character device, not a tty, under
+# /sys/devices/virtual. The patched ModemManager (pmaports/modemmanager)
+# handles ports tagged ID_MM_CCCI_AT_PORT like wwan AT ports, owned by the
+# platform device named in ID_MM_PHYSDEV_SYSFS_PATH. The other CCCI nodes
+# (ccci_fs, ccci_rpc, ...) belong to ccci_mdinit/ccci_rpcd: never tag them.
+SUBSYSTEM=="ccci_node", KERNEL=="ttyC0", \
+	ENV{ID_MM_CANDIDATE}="1", \
+	ENV{ID_MM_CCCI_AT_PORT}="1", \
+	ENV{ID_MM_PORT_TYPE_AT_PRIMARY}="1", \
+	ENV{ID_MM_PHYSDEV_SYSFS_PATH}="/sys/devices/platform/mddriver", \
+	ENV{ID_MM_PHYSDEV_UID}="lagos-modem"

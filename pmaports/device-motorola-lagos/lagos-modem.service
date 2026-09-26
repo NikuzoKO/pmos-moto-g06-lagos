@@ -9,6 +9,10 @@ Before=ModemManager.service
 [Service]
 Type=simple
 ExecStart=/usr/bin/lagos-modem
+# Only count as started once the modem is ready (md1:4), so ModemManager
+# doesn't probe ttyC0 while it's still booting
+ExecStartPost=/bin/sh -c 'for i in $(seq 120); do grep -q "md1:4" /sys/kernel/ccci/boot && exit 0; sleep 0.5; done; exit 1'
+TimeoutStartSec=90
 Restart=on-failure
 RestartSec=5
 

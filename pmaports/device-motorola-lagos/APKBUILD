@@ -2,7 +2,7 @@
 maintainer=""
 pkgname=device-motorola-lagos
 pkgver=1
-pkgrel=11
+pkgrel=12
 pkgdesc="Motorola Moto G06"
 url="https://postmarketos.org"
 arch="aarch64"
@@ -38,6 +38,7 @@ source="
 	lagos-bt.service
 	lagos-modem
 	lagos-modem.service
+	78-lagos-modem.rules
 	sxmo-deviceprofile-lagos.sh
 	"
 options="!archcheck !check"
@@ -78,6 +79,7 @@ package() {
 	install -Dm644 "$srcdir"/lagos-bt.service "$pkgdir"/usr/lib/systemd/system/lagos-bt.service
 	install -Dm755 "$srcdir"/lagos-modem "$pkgdir"/usr/bin/lagos-modem
 	install -Dm644 "$srcdir"/lagos-modem.service "$pkgdir"/usr/lib/systemd/system/lagos-modem.service
+	install -Dm644 "$srcdir"/78-lagos-modem.rules "$pkgdir"/usr/lib/udev/rules.d/78-lagos-modem.rules
 
 	# sxmo finds it by the first DT compatible; abuild won't take a comma in
 	# a source file name
@@ -112,6 +114,7 @@ e1bac947fb1d90048c0d46833eb76ebd706f5016532229f457e6373a2b7ed00619f408bbc7d43494
 76de36782545f0b1fce6c61a0f1453cfb502aa2dced3793921c76cbdc6de9ca66e6ec0bdb065f10bbf629c36a1634524a1ebde177887b7c9986d3a02d3c99fd2  lagos-nvdata
 16ed08496e4df9b468bf74f2881266b0d015c0d244c1e704425fc670f94b387117b2074377f2e2fbb1e3132a45a63ec485210bbb4dac6ca73ef78f9756cbfe7c  lagos-bt.service
 6cf843a383a78803477bd188c86614cf7a1378ec399a176a92ca0b899be8f7d89b9f0e044b58d20ff31ee6b77dd3aabd7670120bdba664800d30f37db3f4c645  lagos-modem
-9b9e069edd5f4de980cad2be5459c4990e4d3cf90edcfe03dc7b39628e890f45a8fb6c2758ecb3b6ace5375f31a5b6bf2a32d6d0b8728148615279adb595815a  lagos-modem.service
+259bcf77b28943ff5931a26e016e2114afa0655503db825d7fafd84aa591c6d38b2fa35898ab182cd3a126b004e31cb9b4a64e5162d41ef17a9fa48688ce748d  lagos-modem.service
+c58c66e5ec0ab682d710f54ba2c6ae0360c61ced7bf947dd415ac4fb3c29dfd0c6deb27e7c4cbcc11b1d3c3772ddfa076ece01e9aeda393b4644b5688b8a82a7  78-lagos-modem.rules
 2afc68235744a4cb1ac3583b99cd4c3bfe90967e3379cf9dacb06ced5366a0f077da6219f6386325e0760e5db449cb4598b84f461cda0405b0553d7a0192f5b3  sxmo-deviceprofile-lagos.sh
 "

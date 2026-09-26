@@ -1,0 +1,112 @@
+# Forked from Alpine aports community/modemmanager for the Moto G06 (lagos):
+# adds support for MediaTek CCCI AT ports (0100-*.patch). Keep pkgver in
+# sync with Alpine; pkgrel stays above theirs.
+# Contributor: Stuart Cardall <developer@it-offshore.co.uk>
+maintainer="Achill Gilgenast <achill@achill.org>"
+pkgname=modemmanager
+pkgver=1.25.95_git20260709
+pkgrel=100
+_commit=d776ea38d29ca472a12323c1d45002ee19a66f57
+pkgdesc="ModemManager library"
+url="https://www.freedesktop.org/wiki/Software/ModemManager"
+arch="all"
+license="GPL-2.0-or-later AND LGPL-2.1-or-later"
+depends="
+	dbus
+	libmm-glib=$pkgver-r$pkgrel
+	mobile-broadband-provider-info
+	polkit
+	"
+depends_dev="libmm-glib=$pkgver-r$pkgrel"
+# Not $depends_dev: libmm-glib is built in-tree, and a pinned
+# libmm-glib=$pkgver-r$pkgrel can't exist before the first build
+makedepends="
+	bash-completion-dev
+	dbus-dev
+	elogind-dev
+	gobject-introspection-dev
+	gtk-doc
+	libgudev-dev
+	libmbim-dev
+	libqmi-dev
+	linux-headers
+	meson
+	polkit-dev
+	vala
+	"
+checkdepends="glib-dev py3-gobject3 py3-dbus"
+subpackages="
+	$pkgname-lang
+	$pkgname-doc
+	libmm-glib:libmm
+	$pkgname-dbg
+	$pkgname-dev
+	$pkgname-openrc
+	$pkgname-bash-completion
+	$pkgname-systemd
+	$pkgname-udev
+	"
+#source="https://gitlab.freedesktop.org/mobile-broadband/ModemManager/-/archive/$pkgver/ModemManager-$pkgver.tar.gz
+source="https://gitlab.freedesktop.org/mobile-broadband/ModemManager/-/archive/$_commit/ModemManager-$_commit.tar.gz
+	$pkgname.rules
+	$pkgname.initd
+
+	0001-intel-XMM7360-fix-big-endian-handling-of-ASN-integer.patch
+	0100-support-mediatek-ccci-at-ports.patch
+	"
+# The test suite is slow under qemu and unchanged by the patch; crossdirect's
+# cc can't spawn cc1 in this buildroot, so build natively under qemu
+options="!check !pmb:crossdirect"
+#builddir="$srcdir"/ModemManager-$pkgver
+builddir="$srcdir"/ModemManager-$_commit
+
+build() {
+	# Temporarily disable gtkdoc generation due to error in helper script
+	# https://gitlab.freedesktop.org/mobile-broadband/ModemManager/-/issues/902
+	abuild-meson \
+		-Db_lto=true \
+		-Dsystemdsystemunitdir=/usr/lib/systemd/system \
+		-Ddbus_policy_dir=/usr/share/dbus-1/system.d \
+		-Dgtk_doc=false \
+		-Dpolkit=permissive \
+		-Dsystemd_journal=false \
+		-Dsystemd_suspend_resume=true \
+		-Dvapi=true \
+		. output
+	meson compile -C output
+}
+
+check() {
+	meson test -C output
+}
+
+package() {
+	DESTDIR="$pkgdir" meson install --no-rebuild -C output
+	install -m644 -D "$srcdir/$pkgname.rules" \
+		"$pkgdir/usr/share/polkit-1/rules.d/01-org.freedesktop.ModemManager.rules"
+	install -m755 -D "$srcdir/$pkgname.initd" \
+		"$pkgdir/etc/init.d/$pkgname"
+
+	# post-install message
+	mkdir -p "$pkgdir/usr/share/doc/$pkgname"
+	cat > "$pkgdir"/usr/share/doc/$pkgname/README.alpine <<- EOF
+	If your USB modem shows up as a Flash drive when you plug it in:
+
+	install 'usb-modeswitch' to automatically switch to USB modem mode whenever you plug it in.
+	To control your modem without the root password: add your user account to the 'plugdev' group.
+	EOF
+}
+
+libmm() {
+	depends=""
+	amove usr/lib/girepository-1.0
+	amove usr/lib/libmm-glib.so*
+}
+
+sha512sums="
+fd659330b2ec4e8368807053ec01498241dec153f6f2491bb17c42e2b81c8d9a98ff5f8c153874a6d092e17c545c5ae19734bc23c85c459eb1c7b9b709e5ff58  ModemManager-d776ea38d29ca472a12323c1d45002ee19a66f57.tar.gz
+6fab86c27502b29be0c6610d835a3249a4a81993eb986cff2c3ea9393fadd3f693ba4bb0532ae0e50a83d359559511859dd05f7ea2f0cb52839f535a7e49f8a0  modemmanager.rules
+6e234cebcdec6d1afbca164ee5c13c96f7132ef31231d5c043cc5750ebe99e362a384d0463874b3c1c30799b433e0d3286add03af13c97fa406b4b5d2b78880c  modemmanager.initd
+f06e9b89acab5b61c5965658d62551b0f168066384674f7c4dd56feb6f811c82c640470e634e32d8c4ef62290588cf974aa5f213e5c67e797a06d33e61fa24ec  0001-intel-XMM7360-fix-big-endian-handling-of-ASN-integer.patch
+feb658c7ab1c03e4d9048f9f684a027a699cfd4326a0af3884149d759e4a03bb16f182e8de0df969c7b315a832331b6778df9988532facc35272f4fa653ff55c  0100-support-mediatek-ccci-at-ports.patch
+"
