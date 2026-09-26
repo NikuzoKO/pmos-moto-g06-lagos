@@ -243,6 +243,26 @@ Extract them from your own device.
    calls and their audio path, SMS, data over `ccmni*`.
 3. Package the initramfs hack and the plymouth masks properly (a
    device-specific hook/package instead of patching `postmarketos-initramfs`).
+5. Suspend (deep, s2idle not needed) works under sxmo, with Bluetooth and
+   WiFi staying up. Three fixes were needed:
+   - `pmaports/wlroots0.20`: Alpine's wlroots plus a patch. sway re-applies
+     the output's color transform when it turns the display back on; this
+     CRTC has no GAMMA_LUT, wlroots falls back to the legacy gamma ioctl,
+     MediaTek's driver returns ENOSYS and the whole commit failed, leaving
+     the display off. The patch treats a gamma *reset* there as done.
+   - `lagos-autosuspend` replaces sxmo_autosuspend.sh (via
+     `/etc/superd/services`): it still waits for `/sys/power/wakeup_count`
+     but doesn't write it back. bt_drv takes a 100ms wakeup event on every
+     controller event, and the kernel's Bluetooth suspend notifier talks to
+     the controller during each attempt, so with the count armed every
+     attempt aborted.
+   - `lagos-wowlan` enables Wake-on-WLAN ("any"); without it cfg80211
+     disconnects WiFi on every suspend. Multicast/broadcast on the LAN
+     wakes the phone (no firmware suspend-mode filter yet).
+   The display's own wakelock blocks suspend until it's powered off, and
+   the phone never sleeps while connected to a USB host ("USB suspend
+   lock"). The first attempt with PLLs on is vetoed by MediaTek's clkchk;
+   the retry passes.
 4. zram swap and the firewall work. The stock kernel has no nf_tables, so
    `lagos-firewall.service` loads pmOS's default nftables rules, translated
    for legacy iptables (`iptables-legacy`), and nftables.service skips

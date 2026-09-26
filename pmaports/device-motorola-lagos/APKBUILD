@@ -2,7 +2,7 @@
 maintainer=""
 pkgname=device-motorola-lagos
 pkgver=1
-pkgrel=18
+pkgrel=19
 pkgdesc="Motorola Moto G06"
 url="https://postmarketos.org"
 arch="aarch64"
@@ -15,6 +15,7 @@ depends="
 	postmarketos-base-downstream
 	iptables
 	iptables-legacy
+	iw
 	"
 makedepends="devicepkg-dev"
 source="
@@ -38,6 +39,9 @@ source="
 	lagos-wifi.service
 	lagos-nvdata
 	lagos-bt.service
+	lagos-wowlan
+	lagos-autosuspend
+	sxmo_autosuspend.service
 	lagos-android-root
 	lagos-android-root.service
 	lagos-android-run
@@ -90,6 +94,11 @@ package() {
 	install -Dm644 "$srcdir"/lagos-wmt.service "$pkgdir"/usr/lib/systemd/system/lagos-wmt.service
 	install -Dm644 "$srcdir"/lagos-wifi.service "$pkgdir"/usr/lib/systemd/system/lagos-wifi.service
 	install -Dm644 "$srcdir"/lagos-bt.service "$pkgdir"/usr/lib/systemd/system/lagos-bt.service
+	install -Dm755 "$srcdir"/lagos-wowlan "$pkgdir"/usr/bin/lagos-wowlan
+	install -Dm755 "$srcdir"/lagos-autosuspend "$pkgdir"/usr/bin/lagos-autosuspend
+	# superd prefers /etc/superd/services over sxmo's own unit
+	install -Dm644 "$srcdir"/sxmo_autosuspend.service \
+		"$pkgdir"/etc/superd/services/sxmo_autosuspend.service
 	install -Dm755 "$srcdir"/lagos-android-root "$pkgdir"/usr/bin/lagos-android-root
 	install -Dm755 "$srcdir"/lagos-android-run "$pkgdir"/usr/bin/lagos-android-run
 	install -Dm644 "$srcdir"/lagos-android-root.service \
@@ -140,9 +149,12 @@ cee4825eb9d5d3141bba9aad24156380d6ea67ee88e626692925ca953905d25ebfca492753ab5850
 edf2d764454330abeb1ccaf4363471e458e2443aac759bbe5871a383294e791ef1d1b67cb8b1611b6857717cac991181c00f7d3d6873410d9898582686426956  pipewire-lagos-speaker.conf
 31f7dbf68dcbfdd2780fa0d9eeab28fd170186f23a3de9857c274add6211969598a9f401168ceb04bda559a72431971d4875bb4f2dfe3cb7b0524425825ce382  alsa-lagos-skip.conf
 fcc68e3fa00e34027189b20e95d4e06dca3c91be0e3848c4c310fc090bcff98d9ac35f01e09eef44378d30e192f1c539888e4377fe02d32b57287cd3e75be298  lagos-wmt.service
-1387f10925fe95569878385232b47474ed5d77a7997bca8e0ed7390b68a5a71af037c9c01075e6b4313a63b5f34767258b0cb2a40a7352efe95c3ec6c2322fdb  lagos-wifi.service
+e923d4849b4a0abb1282161b5c218d3e610bc3797cd4196818ca949ce4a54df9259fd6de8bf279ce9e7c5a8328b36cd6356c39ab9d425c6c143c84d6e1124e88  lagos-wifi.service
 76de36782545f0b1fce6c61a0f1453cfb502aa2dced3793921c76cbdc6de9ca66e6ec0bdb065f10bbf629c36a1634524a1ebde177887b7c9986d3a02d3c99fd2  lagos-nvdata
 e42f96ff9d2abb966b435696a4848f83be6bd35e1d07e2c5053c48c32d76f6faed71f348721fa59a7c5c2cd4303dfba01106e0bf7574bba7f516099644c1820d  lagos-bt.service
+47a4d4023dc3d460d399d5be775d85c0869e0d6fe742f6d4816b13fff33aa18be838c441918fe5fd35f72385c2c982fccdba566196342000dd9e9b8f9d45bddc  lagos-wowlan
+9f392736d6828466b099d3cfa26eb88d3e76c38a7279035e1219090b6c991bd5493881d280a4e1e6e2b87e3408eb29c72a64cf16f946e8beacf94dca2d995e8b  lagos-autosuspend
+f358290dd55c4c21accaf74647cfcce9f83b99addfe2860b80cee0f43543fba7e617b3dcb23f519c2d91f83a6f16f53a10106a9caa33f4ee7f25af2699e19883  sxmo_autosuspend.service
 ad61b4ce13c5feb6268a59a85d7c1dd89522b8d4fd874a02a85acf3c99422b78fd6f64bf6e1c39832f8751c6d7b089b24d00b519ceb92b25ce7b357c081d70f4  lagos-android-root
 cd22979ebbab01d5133328c15731416c3ff34121ee9b5ec064f44783550b0c6310d9ca9788fa6dbe34a1943ccf1669cf1cc12c6965681077508a77a5c6c977b5  lagos-android-root.service
 bde4010d5074ebdabf8ce16698e0b50df767a24a75b5f396b7106131cf406fa7772c05480b72d77a8eb1af96978672e66661ab79dc4c0169bc65a81ecbc199d1  lagos-android-run

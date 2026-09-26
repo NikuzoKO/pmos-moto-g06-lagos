@@ -1,0 +1,38 @@
+#!/bin/sh
+# sxmo_autosuspend.sh without arming /sys/power/wakeup_count.
+#
+# Reading wakeup_count still waits until no wakeup source is active (sxmo's
+# own wakelocks included). Writing it back would make any wakeup event
+# between here and the suspend abort it, and this phone's drivers produce
+# harmless ones all the time: bt_drv holds 100ms after every controller
+# event, and the kernel's Bluetooth suspend notifier sends the controller
+# commands during every suspend attempt, so with Bluetooth on the phone
+# never slept; the WiFi driver's thread wakelocks aborted most attempts too.
+
+. sxmo_common.sh
+
+set -e
+
+last_check=0
+
+wait_can_suspend() {
+	if [ "$((last_check + 10))" -gt "$(date +%s)" ]; then
+		return
+	fi
+
+	sxmo_hook_block_suspend.sh
+
+	last_check="$(date +%s)"
+}
+
+while true; do
+	cat /sys/power/wakeup_count > /dev/null
+	wait_can_suspend
+
+	if ! sxmo_suspend.sh; then
+		sleep 1
+		continue
+	fi
+
+	sleep 10
+done

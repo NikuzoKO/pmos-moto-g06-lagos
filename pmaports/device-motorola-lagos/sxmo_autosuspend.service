@@ -1,0 +1,7 @@
+[Unit]
+Description=daemon for autosuspending (lagos: without arming wakeup_count)
+
+[Service]
+Type=simple
+Restart=always
+ExecStart=/usr/bin/lagos-autosuspend
