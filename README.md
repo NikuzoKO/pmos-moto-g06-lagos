@@ -228,8 +228,16 @@ Extract them from your own device.
    `vendor.service.nvram_restore=Ready`). It also loads the CCIF/CLDMA
    transport modules, which own the mailbox clocks: without them the modem
    polls a gated CCIF0 until a Device APC violation storm reboots the phone.
-   Without `ccci_rpcd` the modem fails its second boot handshake. Still to
-   do: ModemManager, SIM, calls, SMS, data (ccmni).
+   Without `ccci_rpcd` the modem fails its second boot handshake.
+   ModemManager needs `pmaports/modemmanager` (Alpine's package plus a
+   patch): `/dev/ttyC0` is a `ccci_node` character device under
+   `/sys/devices/virtual`, not a tty, so stock ModemManager never sees it.
+   The patch handles ports tagged `ID_MM_CCCI_AT_PORT=1` like wwan AT ports
+   and takes their physical device from `ID_MM_PHYSDEV_SYSFS_PATH`;
+   `78-lagos-modem.rules` tags only ttyC0. `mmcli -m 0` then shows the modem
+   (IMEI, firmware, 2G/3G/4G). Keep the fork's pkgver in sync with Alpine,
+   or an Alpine upgrade replaces it. Still to do (needs a SIM): registration,
+   calls and their audio path, SMS, data over `ccmni*`.
 3. Package the initramfs hack and the plymouth masks properly (a
    device-specific hook/package instead of patching `postmarketos-initramfs`).
 4. zram/nftables: load or ship the matching GKI modules.
