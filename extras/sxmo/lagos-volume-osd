@@ -3,7 +3,7 @@
 # Volume/brightness overlay for sxmo, in place of wob: a rounded vertical bar
 # with the percentage under it, in the top right corner. Reads the same input
 # wob does (one number per line on stdin, from sxmo_ob.sh's fifo), so
-# ~/.config/superd/services/sxmo_wob.service just points sxmo_ob.sh here.
+# ~/.config/services/sxmo_wob.service just points sxmo_ob.sh here.
 
 import math
 import sys
@@ -25,7 +25,12 @@ BAR_TOP = 16
 TEXT_SIZE = 15
 MARGIN_TOP = 16
 MARGIN_RIGHT = 12
-HIDE_AFTER_MS = 1500
+
+# How long it stays after the last change, and the animation lengths
+HIDE_AFTER_MS = 3000
+FADE_IN_MS = 180
+FADE_OUT_MS = 350
+BAR_ANIMATION_MS = 220
 
 CARD_COLOR = (0.08, 0.08, 0.09, 0.78)
 TRACK_COLOR = (1.0, 1.0, 1.0, 0.22)
@@ -43,11 +48,47 @@ def rounded_rectangle(context, x, y, width, height, radius):
     context.close_path()
 
 
+def ease_in_out_cubic(progress):
+    if progress < 0.5:
+        return 4 * progress ** 3
+    return 1 - (-2 * progress + 2) ** 3 / 2
+
+
+class Animation:
+    """A value easing from one number to another over a fixed duration."""
+
+    def __init__(self, value):
+        self.start_value = value
+        self.end_value = value
+        self.start_time = 0
+        self.duration_us = 0
+        self.value = value
+
+    def retarget(self, end_value, duration_ms, now_us):
+        # Start from wherever it is now, so interrupted animations stay smooth
+        self.start_value = self.value
+        self.end_value = end_value
+        self.start_time = now_us
+        self.duration_us = duration_ms * 1000
+
+    def update(self, now_us):
+        if self.duration_us <= 0:
+            self.value = self.end_value
+            return False
+        progress = min((now_us - self.start_time) / self.duration_us, 1.0)
+        self.value = self.start_value + (self.end_value - self.start_value) * ease_in_out_cubic(progress)
+        return progress < 1.0
+
+
 class VolumeOverlay(Gtk.Window):
     def __init__(self):
         super().__init__()
         self.percent = 0
+        self.bar = Animation(0.0)
+        self.opacity = Animation(0.0)
+        self.fading_out = False
         self.hide_timer = None
+        self.tick_id = None
 
         GtkLayerShell.init_for_window(self)
         GtkLayerShell.set_layer(self, GtkLayerShell.Layer.OVERLAY)
@@ -64,9 +105,9 @@ class VolumeOverlay(Gtk.Window):
         if visual:
             self.set_visual(visual)
 
-        area = Gtk.DrawingArea()
-        area.connect("draw", self.on_draw)
-        self.add(area)
+        self.area = Gtk.DrawingArea()
+        self.area.connect("draw", self.on_draw)
+        self.add(self.area)
         self.connect("realize", self.on_realize)
 
     def on_realize(self, _window):
@@ -79,6 +120,9 @@ class VolumeOverlay(Gtk.Window):
         context.paint()
         context.set_operator(cairo.OPERATOR_OVER)
 
+        # Draw the whole card, then composite it at the fade opacity
+        context.push_group()
+
         context.set_source_rgba(*CARD_COLOR)
         rounded_rectangle(context, 0, 0, CARD_WIDTH, CARD_HEIGHT, CARD_RADIUS)
         context.fill()
@@ -89,7 +133,7 @@ class VolumeOverlay(Gtk.Window):
         context.fill()
 
         # Fills from the bottom; clip to the track so small values stay rounded
-        fill_height = BAR_HEIGHT * max(0, min(self.percent, 100)) / 100
+        fill_height = BAR_HEIGHT * max(0.0, min(self.bar.value, 100.0)) / 100
         if fill_height > 0:
             context.save()
             rounded_rectangle(context, bar_x, BAR_TOP, BAR_WIDTH, BAR_HEIGHT, BAR_WIDTH / 2)
@@ -109,19 +153,56 @@ class VolumeOverlay(Gtk.Window):
                         text_area_top + (text_area_height - extents.height) / 2 - extents.y_bearing)
         context.set_source_rgba(*TEXT_COLOR)
         context.show_text(label)
+
+        context.pop_group_to_source()
+        context.paint_with_alpha(max(0.0, min(self.opacity.value, 1.0)))
+        return False
+
+    def now_us(self):
+        frame_clock = self.get_frame_clock()
+        return frame_clock.get_frame_time() if frame_clock else GLib.get_monotonic_time()
+
+    def start_ticking(self):
+        if self.tick_id is None:
+            self.tick_id = self.area.add_tick_callback(self.on_tick)
+
+    def on_tick(self, _widget, frame_clock):
+        now = frame_clock.get_frame_time()
+        bar_running = self.bar.update(now)
+        opacity_running = self.opacity.update(now)
+        self.area.queue_draw()
+
+        if opacity_running or bar_running:
+            return True
+
+        self.tick_id = None
+        if self.fading_out:
+            self.fading_out = False
+            self.hide()
         return False
 
     def show_percent(self, percent):
         self.percent = percent
-        self.queue_draw()
-        self.show_all()
+        if not self.get_visible():
+            self.show_all()
+        now = self.now_us()
+
+        self.bar.retarget(float(percent), BAR_ANIMATION_MS, now)
+        # Fade in, or reverse a fade-out that's under way
+        if self.opacity.end_value != 1.0:
+            self.fading_out = False
+            self.opacity.retarget(1.0, FADE_IN_MS, now)
+        self.start_ticking()
+
         if self.hide_timer:
             GLib.source_remove(self.hide_timer)
         self.hide_timer = GLib.timeout_add(HIDE_AFTER_MS, self.on_hide_timer)
 
     def on_hide_timer(self):
         self.hide_timer = None
-        self.hide()
+        self.fading_out = True
+        self.opacity.retarget(0.0, FADE_OUT_MS, self.now_us())
+        self.start_ticking()
         return False
 
 
@@ -135,10 +216,10 @@ def main():
             return False
         # wob's format: a number, optionally followed by colors; sxmo sends
         # plain numbers (and "muted" as 0)
-        word = line.split()[0] if line.split() else ""
+        words = line.split()
         try:
-            overlay.show_percent(round(float(word)))
-        except ValueError:
+            overlay.show_percent(round(float(words[0])))
+        except (IndexError, ValueError):
             pass
         return True
 
