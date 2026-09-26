@@ -1,0 +1,47 @@
+# IPv6 half of lagos-firewall.rules (see there). Load with
+# ip6tables-legacy-restore.
+*filter
+:INPUT DROP [0:0]
+:FORWARD DROP [0:0]
+:OUTPUT ACCEPT [0:0]
+-A INPUT -i lo -j ACCEPT -m comment --comment "Accept any localhost traffic"
+-A INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT -m comment --comment "Accept traffic originated from us"
+-A INPUT -m conntrack --ctstate INVALID -j DROP -m comment --comment "Drop invalid connections"
+-A INPUT -p tcp --dport 113 -j REJECT --reject-with icmp6-port-unreachable -m comment --comment "Reject AUTH to make it fail fast"
+-A INPUT -p ipv6-icmp --icmpv6-type destination-unreachable -j ACCEPT
+-A INPUT -p ipv6-icmp --icmpv6-type packet-too-big -j ACCEPT
+-A INPUT -p ipv6-icmp --icmpv6-type time-exceeded -j ACCEPT
+-A INPUT -p ipv6-icmp --icmpv6-type parameter-problem -j ACCEPT
+-A INPUT -p ipv6-icmp --icmpv6-type echo-request -j ACCEPT
+-A INPUT -p ipv6-icmp --icmpv6-type echo-reply -j ACCEPT
+-A INPUT -p ipv6-icmp --icmpv6-type router-solicitation -m hl --hl-eq 255 -j ACCEPT -m comment --comment "Allow IPv6 SLAAC"
+-A INPUT -p ipv6-icmp --icmpv6-type router-advertisement -m hl --hl-eq 255 -j ACCEPT -m comment --comment "Allow IPv6 SLAAC"
+-A INPUT -p ipv6-icmp --icmpv6-type neighbour-solicitation -m hl --hl-eq 255 -j ACCEPT -m comment --comment "Allow IPv6 SLAAC"
+-A INPUT -p ipv6-icmp --icmpv6-type neighbour-advertisement -m hl --hl-eq 255 -j ACCEPT -m comment --comment "Allow IPv6 SLAAC"
+-A INPUT -s fe80::/10 -p ipv6-icmp --icmpv6-type 130 -j ACCEPT -m comment --comment "Allow IPv6 multicast listener discovery on link-local"
+-A INPUT -s fe80::/10 -p ipv6-icmp --icmpv6-type 131 -j ACCEPT
+-A INPUT -s fe80::/10 -p ipv6-icmp --icmpv6-type 132 -j ACCEPT
+-A INPUT -s fe80::/10 -p ipv6-icmp --icmpv6-type 143 -j ACCEPT
+-A INPUT -s fe80::/10 -p udp --sport 547 --dport 546 -j ACCEPT -m comment --comment "Accept DHCPv6 replies from IPv6 link-local addresses"
+# 01_wwan.nft, plus the MediaTek modem's data interfaces
+-A INPUT -i wwan+ -j DROP -m comment --comment "drop all connections on wwan"
+-A INPUT -i qmapmux+ -j DROP -m comment --comment "drop all connections on qmapmux"
+-A INPUT -i ccmni+ -j DROP -m comment --comment "drop all connections on ccmni"
+# 10_dhcp.nft
+-A INPUT -i usb+ -p udp --dport 67 -j ACCEPT -m comment --comment "accept incoming DHCP on usb*"
+-A INPUT -i wlan+ -p udp --dport 67 -j ACCEPT -m comment --comment "accept incoming DHCP on wlan*"
+-A INPUT -i p2p-wlan+ -p udp --dport 67 -j ACCEPT -m comment --comment "accept incoming DHCP on p2p-wlan*"
+# 50_ausweisapp2.nft, 50_localsend.nft, 50_sshd.nft
+-A INPUT -p tcp --dport 24727 -j ACCEPT -m comment --comment "accept connections for BundID AusweisApp2"
+-A INPUT -p udp --dport 53317 -j ACCEPT -m comment --comment "localsend device discovery"
+-A INPUT -p tcp --dport 53317 -j ACCEPT -m comment --comment "localsend file transfer"
+-A INPUT -p tcp --dport 22 -j ACCEPT -m comment --comment "accept SSH"
+# 51_hotspot.nft
+-A INPUT -i wlan+ -p tcp --dport 53 -j ACCEPT -m comment --comment "Accept DNS over TCP on wlan*"
+-A INPUT -i wlan+ -p udp --dport 53 -j ACCEPT -m comment --comment "Accept DNS over UDP on wlan*"
+-A FORWARD -i wlan+ -j ACCEPT -m comment --comment "Accept forwarding from wlan*"
+# 51_usb_inet.nft
+-A INPUT -i usb+ -j ACCEPT -m comment --comment "Allow incoming network traffic from USB"
+-A FORWARD -i usb+ -j ACCEPT -m comment --comment "Allow outgoing network traffic from USB"
+-A FORWARD -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT -m comment --comment "accept established connections"
+COMMIT

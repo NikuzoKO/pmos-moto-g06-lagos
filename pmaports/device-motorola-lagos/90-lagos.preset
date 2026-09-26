@@ -7,3 +7,4 @@ enable lagos-bt.service
 enable bluetooth.service
 enable lagos-modem.service
 enable lagos-fuelgauged.service
+enable lagos-firewall.service

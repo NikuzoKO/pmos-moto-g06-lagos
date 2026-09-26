@@ -2,7 +2,7 @@
 maintainer=""
 pkgname=device-motorola-lagos
 pkgver=1
-pkgrel=16
+pkgrel=18
 pkgdesc="Motorola Moto G06"
 url="https://postmarketos.org"
 arch="aarch64"
@@ -13,6 +13,8 @@ depends="
 	linux-motorola-lagos
 	postmarketos-base
 	postmarketos-base-downstream
+	iptables
+	iptables-legacy
 	"
 makedepends="devicepkg-dev"
 source="
@@ -41,6 +43,12 @@ source="
 	lagos-android-run
 	lagos-fuelgauged.service
 	upower-lagos.conf
+	lagos-zram.conf
+	zram-swap-lagos.conf
+	lagos-firewall.service
+	lagos-firewall.rules
+	lagos-firewall6.rules
+	nftables-lagos.conf
 	lagos-modem
 	lagos-modem.service
 	78-lagos-modem.rules
@@ -90,6 +98,15 @@ package() {
 		"$pkgdir"/usr/lib/systemd/system/lagos-fuelgauged.service
 	install -Dm644 "$srcdir"/upower-lagos.conf \
 		"$pkgdir"/usr/lib/systemd/system/upower.service.d/lagos.conf
+	install -Dm644 "$srcdir"/lagos-zram.conf "$pkgdir"/usr/lib/modules-load.d/lagos-zram.conf
+	install -Dm644 "$srcdir"/zram-swap-lagos.conf \
+		"$pkgdir"/usr/lib/systemd/system/postmarketos-zram-swap.service.d/lagos.conf
+	install -Dm644 "$srcdir"/lagos-firewall.service \
+		"$pkgdir"/usr/lib/systemd/system/lagos-firewall.service
+	install -Dm644 "$srcdir"/lagos-firewall.rules "$pkgdir"/usr/share/lagos/firewall.rules
+	install -Dm644 "$srcdir"/lagos-firewall6.rules "$pkgdir"/usr/share/lagos/firewall6.rules
+	install -Dm644 "$srcdir"/nftables-lagos.conf \
+		"$pkgdir"/usr/lib/systemd/system/nftables.service.d/lagos.conf
 	install -Dm755 "$srcdir"/lagos-modem "$pkgdir"/usr/bin/lagos-modem
 	install -Dm644 "$srcdir"/lagos-modem.service "$pkgdir"/usr/lib/systemd/system/lagos-modem.service
 	install -Dm644 "$srcdir"/78-lagos-modem.rules "$pkgdir"/usr/lib/udev/rules.d/78-lagos-modem.rules
@@ -111,7 +128,7 @@ e70bae17df23dcaaaea0e2d3616556f04baa23f8ee1357785c0f539bf97282d8ddff53953e155b72
 2f42fc7e5944464ffbb589a9cc1cf844041822c853506a3dee2a9f3948f83b7cd6df3ade39226489fad17acfd4c2ea981ccfaaf1ea7ec1a035c6b03895802eab  lagos-stock.dtb
 73bffbed86114800c1cd155a0808af75db8157827957f5e210499c5460ce15c0b609503e6c83ea005456a4aa80451d86da9fe86f6375a6d1e2d4140092f92edc  lagos-backlight-resend
 9f202acf1c9387cc5bd21a7e4877ca542cfe2752ead60fbd7ce32de00f7de7fcda7da38456bd1605c610c8f593a5da55958045052ee50d35edf34b2a34600eee  lagos-backlight-resend.service
-9a0af4e7b158a1a668fa027ff5ba27b95fb342c7693ef4e2bddb1608e13caa081f6fe7f15749d59c3bf7f52e23df9ff50ec52efcb1d5ee7d73fdbacdc55b5324  90-lagos.preset
+d558a89e974de8a5f48275389a0d6971e09d18e6f64ed52232e3f0ef306de0488e4c4c04cbaa5396bebfea20c8bf0b82ce2ced0eaafaee121d062d46d25843e9  90-lagos.preset
 e1bbf1b1defadb6da17845b27e5d07d56eb6bc1bcf2d7ce2d2f583c7053c244e4c04058a846f48f8a01625d26066d06caaf4e0ffc9b3b95d7c5b3c5148d36efe  lagos-mknod
 427ee0fbea1aab71d6e7e633a4962bfb21807d2fb8caaa968a378fbb22150879f01ac1bc3b1160495df5ee448805faad027fa1078b8955cc416cb73a6fc21e66  00-lagos-mknod.rules
 c35f1b121d9ab26cc109581fed5c744c8c4959cec1bb645e779bdac6d4aaedd97ec500bf3d9e8ccf80ef863163a5e8e22b4831709e2bcac44e28f875ec904eb2  lagos-touch.service
@@ -131,6 +148,12 @@ cd22979ebbab01d5133328c15731416c3ff34121ee9b5ec064f44783550b0c6310d9ca9788fa6dbe
 bde4010d5074ebdabf8ce16698e0b50df767a24a75b5f396b7106131cf406fa7772c05480b72d77a8eb1af96978672e66661ab79dc4c0169bc65a81ecbc199d1  lagos-android-run
 807a5cdd0cf74c29e92f8da6690a41a4ec80ffb48325745b923d441a9b0a0ba02444c765bc5915f0a2f14d5835f0ff1ad2f857032736cdd02cfb959ed72bc66b  lagos-fuelgauged.service
 4cd00bc29fa95a60da847e07190dac956008ba75faf4025945d86456be4c8bfcb5bcafb22d55bb593ad0cb994c4101bf1dec4a03ab6542f4b7d0345c7723a30d  upower-lagos.conf
+91f0cbcddd2afd2c3ed3fa1478de1137bdec55d935d79fe85bb960251e7f23e41861f6418a52268285c74569dbced62361b464b6353440401c978edb2a7f9d6e  lagos-zram.conf
+f03433268d1e537d8c5b38098d9c09fa8061893290b12d58eedccb13c0bedb8e01f6cb8edee62c62e3c951c4e8eb9e12a9f2b4ebe6c3c679925ab189fe494692  zram-swap-lagos.conf
+6cc274617140449632e6a5a84e6e597e1192350acdee3b9f9e7867a85e29763c56106101a72c888c7222cb8d4de4cc722a0ce40c1d2e1c16e4df27d9a85b433b  lagos-firewall.service
+78f0a5fd65df3ee0e65ed8142aa12c60fe365607a7d1f48f4e07387099b0d06f52e227cc0e96c56310b1f74adcd3336b99ccf704c986095d5ff434b398f6ffde  lagos-firewall.rules
+abcc3d4ba8d409a941ff937a4c390dcfec4ca9cf33810769fdf8249d3903fa5fef39d1a642c284985524a19f1d7d40edc46db5f049da6b200ab068250c970352  lagos-firewall6.rules
+e63d2d1ea361b978e46bb0bbfa776d73c7f4b4209e30cf646af143ab0ab8c6a545f53519fcb0d2762e4ddda806ff7e2fb76fb17c15a6b35295364f6e456faf4c  nftables-lagos.conf
 08b527a0254a35e2ffbc4b05016ef96fa3ec72862c61514ee5dde2b145933795ec083612dcaeb11e4ddd9f534c4cf5d6e05e1f2b3548ff725cb097893b825679  lagos-modem
 1be73adbc8b6b7d8b448b03a8a58044d58268f148f2e2338b91e7ac9360b22cbf54806bd19ce94722b349299a4673c04f58f73afdec7ea434495dbb90dbe503c  lagos-modem.service
 c58c66e5ec0ab682d710f54ba2c6ae0360c61ced7bf947dd415ac4fb3c29dfd0c6deb27e7c4cbcc11b1d3c3772ddfa076ece01e9aeda393b4644b5688b8a82a7  78-lagos-modem.rules

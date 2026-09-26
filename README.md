@@ -243,7 +243,12 @@ Extract them from your own device.
    calls and their audio path, SMS, data over `ccmni*`.
 3. Package the initramfs hack and the plymouth masks properly (a
    device-specific hook/package instead of patching `postmarketos-initramfs`).
-4. zram/nftables: load or ship the matching GKI modules.
+4. zram swap and the firewall work. The stock kernel has no nf_tables, so
+   `lagos-firewall.service` loads pmOS's default nftables rules, translated
+   for legacy iptables (`iptables-legacy`), and nftables.service skips
+   itself; incoming traffic on `ccmni*` (mobile data) is dropped like on
+   `wwan*`. zram is loaded explicitly, and its service waits for
+   `/dev/zram0` (no devtmpfs: udev creates the node a moment later).
 
 ## Prior art
 

@@ -1,0 +1,39 @@
+# postmarketOS's default nftables firewall (/etc/nftables.nft plus
+# /etc/nftables.d/*.nft), translated for legacy iptables: the stock GKI
+# kernel has no nf_tables. Keep the order: pmOS appends nftables.d rules
+# after the base input rules. Load with iptables-legacy-restore.
+*filter
+:INPUT DROP [0:0]
+:FORWARD DROP [0:0]
+:OUTPUT ACCEPT [0:0]
+-A INPUT -i lo -j ACCEPT -m comment --comment "Accept any localhost traffic"
+-A INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT -m comment --comment "Accept traffic originated from us"
+-A INPUT -m conntrack --ctstate INVALID -j DROP -m comment --comment "Drop invalid connections"
+-A INPUT -p tcp --dport 113 -j REJECT --reject-with icmp-port-unreachable -m comment --comment "Reject AUTH to make it fail fast"
+-A INPUT -p icmp --icmp-type echo-reply -j ACCEPT
+-A INPUT -p icmp --icmp-type destination-unreachable -j ACCEPT
+-A INPUT -p icmp --icmp-type echo-request -j ACCEPT
+-A INPUT -p icmp --icmp-type time-exceeded -j ACCEPT
+-A INPUT -p icmp --icmp-type parameter-problem -j ACCEPT
+# 01_wwan.nft, plus the MediaTek modem's data interfaces
+-A INPUT -i wwan+ -j DROP -m comment --comment "drop all connections on wwan"
+-A INPUT -i qmapmux+ -j DROP -m comment --comment "drop all connections on qmapmux"
+-A INPUT -i ccmni+ -j DROP -m comment --comment "drop all connections on ccmni"
+# 10_dhcp.nft
+-A INPUT -i usb+ -p udp --dport 67 -j ACCEPT -m comment --comment "accept incoming DHCP on usb*"
+-A INPUT -i wlan+ -p udp --dport 67 -j ACCEPT -m comment --comment "accept incoming DHCP on wlan*"
+-A INPUT -i p2p-wlan+ -p udp --dport 67 -j ACCEPT -m comment --comment "accept incoming DHCP on p2p-wlan*"
+# 50_ausweisapp2.nft, 50_localsend.nft, 50_sshd.nft
+-A INPUT -p tcp --dport 24727 -j ACCEPT -m comment --comment "accept connections for BundID AusweisApp2"
+-A INPUT -p udp --dport 53317 -j ACCEPT -m comment --comment "localsend device discovery"
+-A INPUT -p tcp --dport 53317 -j ACCEPT -m comment --comment "localsend file transfer"
+-A INPUT -p tcp --dport 22 -j ACCEPT -m comment --comment "accept SSH"
+# 51_hotspot.nft
+-A INPUT -i wlan+ -p tcp --dport 53 -j ACCEPT -m comment --comment "Accept DNS over TCP on wlan*"
+-A INPUT -i wlan+ -p udp --dport 53 -j ACCEPT -m comment --comment "Accept DNS over UDP on wlan*"
+-A FORWARD -i wlan+ -j ACCEPT -m comment --comment "Accept forwarding from wlan*"
+# 51_usb_inet.nft
+-A INPUT -i usb+ -j ACCEPT -m comment --comment "Allow incoming network traffic from USB"
+-A FORWARD -i usb+ -j ACCEPT -m comment --comment "Allow outgoing network traffic from USB"
+-A FORWARD -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT -m comment --comment "accept established connections"
+COMMIT

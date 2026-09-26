@@ -1,0 +1,16 @@
+[Unit]
+Description=Firewall (postmarketOS rules, legacy iptables)
+# The stock GKI kernel has no nf_tables, so nftables.service can't load
+# pmOS's firewall; this loads the same rules into legacy iptables instead
+ConditionPathExists=!/sys/module/nf_tables
+Before=network-pre.target
+Wants=network-pre.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/iptables-legacy-restore /usr/share/lagos/firewall.rules
+ExecStart=/usr/sbin/ip6tables-legacy-restore /usr/share/lagos/firewall6.rules
+
+[Install]
+WantedBy=multi-user.target
