@@ -3,3 +3,5 @@ enable lagos-touch.service
 enable lagos-audio.service
 enable lagos-wmt.service
 enable lagos-wifi.service
+enable lagos-bt.service
+enable bluetooth.service

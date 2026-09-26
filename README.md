@@ -202,7 +202,14 @@ Extract them from your own device.
    (`soc1_0_*`, `WIFI_RAM_CODE_soc1_0_1a_1.bin`, `WMT_SOC.cfg`, `wifi.cfg`,
    `connfem.cfg`) comes from your `vendor` image into `/usr/lib/firmware/`.
    Order matters: the NVRAM must reach the driver while WiFi is still off.
-   Bluetooth and the modem are still to do.
+5. Bluetooth works with BlueZ. The vendor driver only offers /dev/stpbt (raw
+   H4, powers BT on when opened) and the GKI kernel has no hci_vhci, so
+   `lagos-wmt bt-attach` sets the phone's address (MediaTek vendor command
+   0xfc1a, from nvdata's BT_Addr), puts hci_uart's H4 line discipline on a
+   pseudo-terminal and relays packets. It hides the Synchronization Train
+   feature bit: the controller advertises it but rejects the matching
+   command, which aborts the kernel's hci0 init. `lagos-nvdata` copies both
+   nvdata files (WIFI, BT_Addr) once. The modem is still to do.
 3. Package the initramfs hack and the plymouth masks properly (a
    device-specific hook/package instead of patching `postmarketos-initramfs`).
 4. zram/nftables: load or ship the matching GKI modules.

@@ -1,0 +1,21 @@
+#!/bin/sh
+# Copy per-device calibration files (e.g. WIFI: MAC address and RF
+# calibration; BT_Addr: Bluetooth address) out of the Android nvdata
+# partition, once each, into /var/lib/lagos/nvdata/. nvdata is mounted
+# read-only with noload, so not even its journal is replayed: it's never
+# written to.
+set -e
+
+destination=/var/lib/lagos/nvdata
+missing=
+for name in "$@"; do
+	[ -s "$destination/$name" ] || missing="$missing $name"
+done
+[ -n "$missing" ] || exit 0
+
+mountpoint=$(mktemp -d)
+trap 'umount "$mountpoint" 2>/dev/null; rmdir "$mountpoint"' EXIT
+mount -t ext4 -o ro,noload /dev/disk/by-partlabel/nvdata "$mountpoint"
+for name in $missing; do
+	install -Dm600 "$mountpoint/APCFG/APRDEB/$name" "$destination/$name"
+done

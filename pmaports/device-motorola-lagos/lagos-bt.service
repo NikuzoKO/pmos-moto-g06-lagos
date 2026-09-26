@@ -1,0 +1,16 @@
+[Unit]
+Description=Attach the MT6768 Bluetooth controller as hci0
+Requires=lagos-wmt.service
+After=lagos-wmt.service
+Before=bluetooth.service
+ConditionPathExists=/usr/lib/modules/%v/vendor_dlkm/bt_drv_connac1x.ko
+
+[Service]
+Type=notify
+ExecStartPre=/usr/sbin/modprobe -a bt_drv_connac1x hci_uart
+ExecStartPre=/usr/bin/lagos-nvdata BT_Addr
+ExecStart=/usr/bin/lagos-wmt bt-attach /var/lib/lagos/nvdata/BT_Addr
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
