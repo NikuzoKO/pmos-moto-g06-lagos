@@ -1,6 +1,6 @@
 pkgname=lagos-wmt
 pkgver=1
-pkgrel=2
+pkgrel=3
 pkgdesc="Open stand-in for MediaTek's Android wmt_loader/wmt_launcher (MT6768 connsys)"
 url="https://github.com/NikuzoKO/pmos-moto-g06-lagos"
 arch="aarch64"
@@ -18,5 +18,5 @@ package() {
 	install -Dm755 lagos-wmt "$pkgdir"/usr/bin/lagos-wmt
 }
 sha512sums="
-6e68f6c7a75460ae71a15176148f39c443f8d7f4f1aa99f194e63428558725da59d4e6c314737f73c5edb8d719609643319ea5499066dd9adf417c8c2934f5c2  lagos-wmt.c
+83e5679dd3b847669c572f0e49b4780b660a49a232bb18fb3e5226ff0aa97b4c1369acfdf24fefd83012feeef1c24b15a80fb6e886c2413c05f34a0e91f402e4  lagos-wmt.c
 "

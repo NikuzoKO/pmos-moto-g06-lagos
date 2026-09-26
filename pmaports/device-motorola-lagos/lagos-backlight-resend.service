@@ -1,5 +1,5 @@
 [Unit]
-Description=Re-send panel brightness after the display powers up
+Description=React to the panel powering up and down (backlight, WiFi suspend mode)
 After=systemd-journald.service
 
 [Service]

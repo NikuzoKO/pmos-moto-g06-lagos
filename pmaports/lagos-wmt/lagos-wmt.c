@@ -16,6 +16,11 @@
 //       switch on station mode, which creates wlan0. The driver only registers
 //       with WMT once it has the NVRAM, and the NVRAM must arrive while WiFi
 //       is still off.
+//   lagos-wmt wifi-suspend-mode 0|1
+//       What Android does when the screen turns off/on: the gen4m driver's
+//       "SETSUSPENDMODE" private command. In suspend mode the firmware
+//       drops multicast (the list shrinks to IPv6 all-nodes), so LAN
+//       discovery chatter stops waking the phone from sleep.
 //   lagos-wmt bt-attach bt-address-file
 //       What the Android Bluetooth HAL does, for BlueZ: power BT on through
 //       /dev/stpbt (raw H4 packets), set this phone's address (the first 6
@@ -40,6 +45,7 @@
 #include <sys/ioctl.h>
 #include <sys/socket.h>
 #include <sys/un.h>
+#include <net/if.h>
 #include <termios.h>
 #include <unistd.h>
 
@@ -568,8 +574,49 @@ static int bt_attach(const char *address_path)
 	}
 }
 
+// gen4m's private driver commands (priv_support_driver_cmd): a text command
+// in an inline buffer, through SIOCDEVPRIVATE + 1 on the interface
+#define PRIVATE_COMMAND_SIZE 512
+
+struct private_command {
+	char buffer[PRIVATE_COMMAND_SIZE];
+	int used_length;
+	int total_length;
+};
+
+static int wifi_suspend_mode(const char *enable)
+{
+	struct private_command command = { .total_length = PRIVATE_COMMAND_SIZE };
+	struct ifreq request = { 0 };
+	int sock;
+	int result;
+
+	if (strcmp(enable, "0") != 0 && strcmp(enable, "1") != 0) {
+		fprintf(stderr, "wifi-suspend-mode takes 0 or 1\n");
+		return 2;
+	}
+	command.used_length = snprintf(command.buffer, sizeof(command.buffer),
+				       "SETSUSPENDMODE %s", enable) + 1;
+	strncpy(request.ifr_name, "wlan0", sizeof(request.ifr_name) - 1);
+	request.ifr_data = (void *)&command;
+
+	sock = socket(AF_INET, SOCK_DGRAM, 0);
+	if (sock < 0) {
+		perror("socket");
+		return 1;
+	}
+	result = ioctl(sock, SIOCDEVPRIVATE + 1, &request);
+	if (result < 0)
+		perror("SETSUSPENDMODE");
+	close(sock);
+	return result < 0;
+}
+
 int main(int argc, char **argv)
 {
+	if (argc >= 3 && strcmp(argv[1], "wifi-suspend-mode") == 0)
+		return wifi_suspend_mode(argv[2]);
+
 	if (argc >= 3 && strcmp(argv[1], "bt-attach") == 0)
 		return bt_attach(argv[2]);
 
@@ -593,7 +640,7 @@ int main(int argc, char **argv)
 		return launch();
 	}
 
-	fprintf(stderr, "usage: %s init | launch [-p firmware-dir] [-x patch-prefix] | wifi-on nvram-file | bt-attach bt-address-file\n",
+	fprintf(stderr, "usage: %s init | launch [-p firmware-dir] [-x patch-prefix] | wifi-on nvram-file | wifi-suspend-mode 0|1 | bt-attach bt-address-file\n",
 		argv[0]);
 	return 2;
 }

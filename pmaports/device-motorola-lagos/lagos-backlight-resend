@@ -1,7 +1,10 @@
 #!/bin/sh
-# The panel backlight is set by a DSI command, which the LED core only sends
-# when the brightness value changes. After the display powers up again it stays
-# dark, so re-send the current level once the panel is prepared.
+# React to the panel powering up and down:
+# - The backlight is set by a DSI command, which the LED core only sends when
+#   the brightness value changes. After the display powers up again it stays
+#   dark, so re-send the current level once the panel is prepared.
+# - Like Android on screen off/on, switch the WiFi firmware's suspend mode,
+#   which drops multicast so LAN chatter doesn't keep waking the phone.
 
 BRIGHTNESS=/sys/class/leds/lcd-backlight/brightness
 
@@ -20,9 +23,13 @@ resend_brightness() {
 journalctl -k -f -n0 -o cat | while read -r line; do
 	case "$line" in
 	*mtk_drm_crtc_atomic_resume*)
+		lagos-wmt wifi-suspend-mode 0 &
 		# panel prepare takes ~220ms after this line
 		sleep 0.5
 		resend_brightness
+		;;
+	*"tianma_unprepare +"*)
+		lagos-wmt wifi-suspend-mode 1 &
 		;;
 	esac
 done
