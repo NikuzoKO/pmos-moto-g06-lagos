@@ -1,0 +1,7 @@
+[Unit]
+Description=Notify that the headset jack isn't configured yet
+
+[Service]
+Type=simple
+Restart=always
+ExecStart=/home/nikuzo/.local/bin/lagos-jack-notice

@@ -1,0 +1,35 @@
+#!/usr/bin/env python3
+# Placeholder until headset routing exists: when something is plugged into
+# the 3.5 mm jack, show a low-urgency notification that audio stays on the
+# speaker. Reads the ASoC jack's input device directly (evtest block-buffers
+# when piped).
+
+import struct
+import subprocess
+
+DEVICE = "/dev/input/by-path/platform-sound-event"
+EVENT_FORMAT = "llHHi"  # struct input_event on 64-bit: timeval, type, code, value
+EVENT_SIZE = struct.calcsize(EVENT_FORMAT)
+EV_SW = 5
+SW_JACK_PHYSICAL_INSERT = 7
+
+
+def notify():
+    subprocess.run([
+        "notify-send",
+        "--urgency=low",
+        "--expire-time=4000",
+        "--app-name=Audio",
+        "Headset not configured yet",
+        "Sound keeps playing from the speaker.",
+    ])
+
+
+with open(DEVICE, "rb") as device:
+    while True:
+        event = device.read(EVENT_SIZE)
+        if len(event) < EVENT_SIZE:
+            break
+        _, _, event_type, code, value = struct.unpack(EVENT_FORMAT, event)
+        if event_type == EV_SW and code == SW_JACK_PHYSICAL_INSERT and value == 1:
+            notify()
