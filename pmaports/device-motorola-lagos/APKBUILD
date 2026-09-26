@@ -2,7 +2,7 @@
 maintainer=""
 pkgname=device-motorola-lagos
 pkgver=1
-pkgrel=6
+pkgrel=7
 pkgdesc="Motorola Moto G06"
 url="https://postmarketos.org"
 arch="aarch64"
@@ -35,6 +35,7 @@ source="
 	lagos-wmt.service
 	lagos-wifi.service
 	lagos-wifi-nvram
+	sxmo-deviceprofile-lagos.sh
 	"
 options="!archcheck !check"
 
@@ -72,6 +73,11 @@ package() {
 	install -Dm644 "$srcdir"/lagos-wmt.service "$pkgdir"/usr/lib/systemd/system/lagos-wmt.service
 	install -Dm644 "$srcdir"/lagos-wifi.service "$pkgdir"/usr/lib/systemd/system/lagos-wifi.service
 
+	# sxmo finds it by the first DT compatible; abuild won't take a comma in
+	# a source file name
+	install -Dm755 "$srcdir"/sxmo-deviceprofile-lagos.sh \
+		"$pkgdir"/usr/bin/sxmo_deviceprofile_mediatek,MT6768.sh
+
 	# No tmpfiles rule creates it on this systemd build; alsactl needs it for its lock
 	install -Dm644 "$srcdir"/lagos-run-lock.conf "$pkgdir"/usr/lib/tmpfiles.d/lagos-run-lock.conf
 	install -Dm644 "$srcdir"/tinydm-lagos-novt.conf \
@@ -98,4 +104,5 @@ cee4825eb9d5d3141bba9aad24156380d6ea67ee88e626692925ca953905d25ebfca492753ab5850
 55dbbc67a6e7a35db15a3f636c4694acc4d2362029d042e1e4b9fbe40a28eeca9b2b78a91b0fefd335c7aa82dad88f2bd3ae6378babc40d17a9a8d239c188d7c  lagos-wmt.service
 e2825f0f5ecf7dc9a428105f25d5e8c43cb2276808d0a5aa2fd67ef87bb793d6957548dae656fdc281c2cc61f2df788147928339721ad6a5f39906b91a2a4fe2  lagos-wifi.service
 3e223a9c42eaf4c47f2a910c0a8f29674b0611ebefd7b7991c2d2bf979fc66e372d077f642ee7ef8cf82d63be268c3259567e1e1691a417228716f184123fcbe  lagos-wifi-nvram
+2afc68235744a4cb1ac3583b99cd4c3bfe90967e3379cf9dacb06ced5366a0f077da6219f6386325e0760e5db449cb4598b84f461cda0405b0553d7a0192f5b3  sxmo-deviceprofile-lagos.sh
 "
