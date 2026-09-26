@@ -1,4 +1,7 @@
 [Unit]
+# LK boots into power-off charging mode (bootmode 8) when a charger switches
+# the phone on; the connectivity and modem drivers refuse to init there
+ConditionKernelCommandLine=!oem_devinfo.bootmode=8
 Description=Boot the MT6768 modem (stock ccci_mdinit + ccci_rpcd)
 # The Android root holds stock vendor binaries that aren't redistributable:
 # build it from your own phone's images (see README)

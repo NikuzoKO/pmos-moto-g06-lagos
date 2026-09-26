@@ -1,4 +1,7 @@
 [Unit]
+# LK boots into power-off charging mode (bootmode 8) when a charger switches
+# the phone on; the connectivity and modem drivers refuse to init there
+ConditionKernelCommandLine=!oem_devinfo.bootmode=8
 Description=Switch on the MT6768 WiFi (station mode)
 Requires=lagos-wmt.service
 After=lagos-wmt.service

@@ -1,6 +1,7 @@
 #!/bin/sh
-# Build the minimal Android root that lagos-modem runs ccci_mdinit/ccci_rpcd
-# in, from your own phone's extracted vendor and system partitions.
+# Build the minimal Android root that the stock MediaTek daemons run in
+# (ccci_mdinit/ccci_rpcd for the modem, fuelgauged/fuelgauged_nvram for the
+# battery gauge), from your own phone's extracted vendor and system partitions.
 #
 # usage: build.sh <vendor dir> <system dir> <output.tar.gz>
 #   <vendor dir>  extracted vendor_a (has bin/ccci_mdinit, lib64/)
@@ -31,7 +32,12 @@ mkdir -p "$ROOT/system/bin" "$ROOT/system/lib64" "$ROOT/vendor/bin" \
 	"$ROOT/dev" "$ROOT/proc" "$ROOT/sys" "$ROOT/tmp" "$ROOT/data/vendor"
 cp "$WORK/apex/payload/bin/linker64" "$RUNTIME/bin/"
 ln -s /apex/com.android.runtime/bin/linker64 "$ROOT/system/bin/linker64"
-cp "$VENDOR/bin/ccci_mdinit" "$VENDOR/bin/ccci_rpcd" "$ROOT/vendor/bin/"
+BINARIES="ccci_mdinit ccci_rpcd fuelgauged fuelgauged_nvram"
+# Loaded with dlopen(), so they aren't in any NEEDED list
+DLOPENED="libfgauge_gm30.so"
+for binary in $BINARIES; do
+	cp "$VENDOR/bin/$binary" "$ROOT/vendor/bin/"
+done
 
 # Copy each needed library from bionic, vendor or system, in that order.
 # The system libbinder goes in place of the vendor one: the system
@@ -61,8 +67,16 @@ library_path() {
 	done
 }
 
-queue="$ROOT/vendor/bin/ccci_mdinit $ROOT/vendor/bin/ccci_rpcd"
+queue=""
+for binary in $BINARIES; do
+	queue="$queue $ROOT/vendor/bin/$binary"
+done
 seen=" "
+for name in $DLOPENED; do
+	seen="$seen$name "
+	place_library "$name"
+	queue="$queue $(library_path "$name")"
+done
 while [ -n "$queue" ]; do
 	set -- $queue
 	current=$1

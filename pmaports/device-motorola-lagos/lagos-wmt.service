@@ -1,4 +1,7 @@
 [Unit]
+# LK boots into power-off charging mode (bootmode 8) when a charger switches
+# the phone on; the connectivity and modem drivers refuse to init there
+ConditionKernelCommandLine=!oem_devinfo.bootmode=8
 Description=MediaTek connsys (WMT) firmware launcher
 # The vendor modules and connsys firmware aren't redistributable (see README)
 ConditionPathExists=/usr/lib/modules/%v/vendor_dlkm/wmt_drv.ko
