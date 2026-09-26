@@ -25,3 +25,16 @@ mixer "Headset Volume" 8,8
 mixer "Lineout Volume" 8,8
 # Loads spk-fs1800.bin on first use and powers the amp up (MUSIC scene)
 mixer "FSAMP Switch" On
+
+# Main mic (bottom, analog MEMS on AIN0) -> both ADC channels -> Capture_1.
+# It needs DC-coupled bias ("DCC"): ACC comes out ~20 dB quieter. The PGA
+# steps are 6 dB, 4 = +24 dB (max); Android adds its own software gain on top.
+mixer "Mic Type Mux" "DCC"
+mixer "ADC L Mux" "Left Preamplifier"
+mixer "ADC R Mux" "Right Preamplifier"
+mixer "PGA L Mux" "AIN0"
+mixer "PGA R Mux" "AIN0"
+mixer "PGA1 Volume" 4
+mixer "PGA2 Volume" 4
+mixer "UL1_CH1 ADDA_UL_CH1" on
+mixer "UL1_CH2 ADDA_UL_CH2" on
