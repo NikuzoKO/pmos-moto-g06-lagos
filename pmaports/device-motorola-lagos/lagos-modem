@@ -1,0 +1,40 @@
+#!/bin/sh
+# Boot the MT6768 modem with MediaTek's own ccci_mdinit and ccci_rpcd,
+# running under Android's linker in a minimal Android root (see README).
+#
+# LK already loaded the modem image; the kernel only accepts the start ioctl
+# from a process named "ccci_mdinit", whose fsd thread then serves the
+# modem's NVRAM from the nvdata/protect partitions. ccci_rpcd must run too,
+# or the modem stops at the second boot handshake.
+
+set -e
+
+ROOT=/var/lib/lagos/android
+PARTITIONS=/dev/disk/by-partlabel
+
+# The CCIF/CLDMA transports own the mailbox clocks: without them the modem
+# polls a gated CCIF0 and floods Device APC violations
+modprobe -a ccci_cldma ccci_ccif ccci_fsm_scp
+
+cd "$ROOT"
+mountpoint -q dev || mount --bind /dev dev
+mountpoint -q proc || mount -t proc proc proc
+mountpoint -q sys || mount --bind /sys sys
+
+mount_partition() {
+	mkdir -p "mnt/vendor/$2"
+	mountpoint -q "mnt/vendor/$2" || mount -t ext4 "$PARTITIONS/$1" "mnt/vendor/$2"
+}
+
+mount_partition nvdata nvdata
+mount_partition nvcfg nvcfg
+mount_partition protect1 protect_f
+mount_partition protect2 protect_s
+mount_partition persist persist
+mkdir -p data/vendor/mdlpm data/vendor/md3 data/vendor_de/md
+
+# libpropshim.so stands in for Android's property service
+ANDROID_ENV="LD_LIBRARY_PATH=/vendor/lib64:/system/lib64 LD_PRELOAD=libpropshim.so PATH=/vendor/bin:/system/bin"
+
+env -i $ANDROID_ENV /usr/sbin/chroot . /vendor/bin/ccci_rpcd 0 &
+exec env -i $ANDROID_ENV /usr/sbin/chroot . /vendor/bin/ccci_mdinit 0

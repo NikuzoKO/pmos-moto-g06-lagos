@@ -1,0 +1,14 @@
+# Properties for the stock MTK modem daemons (normally set by Android init/nvram_daemon)
+vendor.service.nvram_restore=Ready
+vendor.service.nvram_init=Ready
+ro.build.type=user
+ro.vendor.mtk_ril_mode=c6m_1rild
+ro.vendor.mtk_protocol1_rat_config=Lf/Lt/W/G
+ro.vendor.mtk_ps1_rat=Lf/Lt/W/G
+ro.vendor.radio.max.multisim=dsds
+ro.vendor.mtk_md_world_mode_support=1
+ro.vendor.md_auto_setup_ims=1
+ro.vendor.md_log_memdump_wait=15
+ro.vendor.mtk_telephony_add_on_policy=0
+ro.vendor.mtk_thin_md_telephony_support_mode=0
+persist.vendor.radio.multisim.config=dsds

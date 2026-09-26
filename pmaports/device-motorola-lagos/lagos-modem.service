@@ -1,0 +1,16 @@
+[Unit]
+Description=Boot the MT6768 modem (stock ccci_mdinit + ccci_rpcd)
+# The Android root holds stock vendor binaries that aren't redistributable:
+# build it from your own phone's images (see README)
+ConditionPathExists=/var/lib/lagos/android/vendor/bin/ccci_mdinit
+After=systemd-udevd.service
+Before=ModemManager.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/lagos-modem
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

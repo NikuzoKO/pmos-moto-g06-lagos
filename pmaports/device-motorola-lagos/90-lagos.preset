@@ -5,3 +5,4 @@ enable lagos-wmt.service
 enable lagos-wifi.service
 enable lagos-bt.service
 enable bluetooth.service
+enable lagos-modem.service

@@ -171,6 +171,14 @@ Extract them from your own device.
    Copy `spk-fs1800.bin` from your `vendor` firmware to `/usr/lib/firmware/`.
    `lagos-audio.service` then loads the card and `lagos-audio-setup` routes it
    to the bottom speaker.
+8. Modem: build the Android root with
+   `tools/android-root/build.sh <vendor dir> <system dir> android-root.tar.gz`
+   from your own extracted `vendor_a` and `system_a` images, then
+   `tar -C /var/lib/lagos -xzf android-root.tar.gz` on the phone.
+   `lagos-modem.service` is skipped until it exists. **Back up `nvdata`,
+   `nvcfg`, `protect1`, `protect2`, `persist`, `proinfo` and `nvram` first**:
+   the modem writes its own NVRAM files there, and they hold the IMEI and RF
+   calibration.
 
 ## Next steps
 
@@ -191,7 +199,8 @@ Extract them from your own device.
    APC violation and the kernel BUG()s. `71-lagos-audio.rules` makes every PCM
    except Playback_1/Capture_1 root-only, and PipeWire gets a fixed sink,
    because its ALSA monitor skips this card (no per-PCM /proc/asound entries).
-   Still to do: earpiece, headset jack switching, microphones.
+   The bottom mic works too (MT6358 AIN0, DC-coupled bias, Capture_1 as a
+   fixed PipeWire source). Still to do: earpiece routing, headset jack.
 4. WiFi works (2.4 and 5 GHz). MediaTek's connsys normally needs two Android
    daemons (wmt_loader, wmt_launcher) and the Android WiFi HAL; `lagos-wmt`
    (its own package) replaces all three: it inits WMT on /dev/wmtdetect,
@@ -209,7 +218,18 @@ Extract them from your own device.
    pseudo-terminal and relays packets. It hides the Synchronization Train
    feature bit: the controller advertises it but rejects the matching
    command, which aborts the kernel's hci0 init. `lagos-nvdata` copies both
-   nvdata files (WIFI, BT_Addr) once. The modem is still to do.
+   nvdata files (WIFI, BT_Addr) once.
+6. The modem boots and answers AT on `/dev/ttyC0` (step 8). LK loads the
+   modem image; `lagos-modem` then runs MediaTek's stock `ccci_mdinit` and
+   `ccci_rpcd` under Android's linker in a chroot, because the kernel only
+   takes the start ioctl from a process named `ccci_mdinit`, and its fsd
+   thread serves the modem's NVRAM files. `libpropshim.so` replaces the
+   Android property service (mdinit waits for
+   `vendor.service.nvram_restore=Ready`). It also loads the CCIF/CLDMA
+   transport modules, which own the mailbox clocks: without them the modem
+   polls a gated CCIF0 until a Device APC violation storm reboots the phone.
+   Without `ccci_rpcd` the modem fails its second boot handshake. Still to
+   do: ModemManager, SIM, calls, SMS, data (ccmni).
 3. Package the initramfs hack and the plymouth masks properly (a
    device-specific hook/package instead of patching `postmarketos-initramfs`).
 4. zram/nftables: load or ship the matching GKI modules.
