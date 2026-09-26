@@ -7,5 +7,3 @@ export SXMO_VOLUME_BUTTON="1:1:mtk-pmic-keys 0:0:mtk-kpd"
 export SXMO_TOUCHSCREEN_ID="0:0:chipone-tddi"
 # 720x1640 panel
 export SXMO_SWAY_SCALE="2"
-# The modem isn't brought up yet
-export SXMO_NO_MODEM=1
