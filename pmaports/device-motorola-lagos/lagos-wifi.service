@@ -1,0 +1,16 @@
+[Unit]
+Description=Switch on the MT6768 WiFi (station mode)
+Requires=lagos-wmt.service
+After=lagos-wmt.service
+Before=NetworkManager.service
+ConditionPathExists=/usr/lib/modules/%v/vendor_dlkm/wlan_drv_gen4m_6768.ko
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStartPre=/usr/sbin/modprobe -a wmt_chrdev_wifi wlan_drv_gen4m_6768
+ExecStartPre=/usr/bin/lagos-wifi-nvram
+ExecStart=/usr/bin/lagos-wmt wifi-on /var/lib/lagos/wifi_nvram.bin
+
+[Install]
+WantedBy=multi-user.target

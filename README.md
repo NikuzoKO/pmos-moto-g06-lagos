@@ -192,7 +192,17 @@ Extract them from your own device.
    except Playback_1/Capture_1 root-only, and PipeWire gets a fixed sink,
    because its ALSA monitor skips this card (no per-PCM /proc/asound entries).
    Still to do: earpiece, headset jack switching, microphones.
-4. WiFi/BT and the modem still need their vendor modules and firmware.
+4. WiFi works (2.4 and 5 GHz). MediaTek's connsys normally needs two Android
+   daemons (wmt_loader, wmt_launcher) and the Android WiFi HAL; `lagos-wmt`
+   (its own package) replaces all three: it inits WMT on /dev/wmtdetect,
+   answers the kernel's firmware requests on /dev/stpwmt from the patch
+   headers, and hands the driver this phone's WiFi NVRAM before switching on
+   station mode. `lagos-wifi-nvram` copies that NVRAM out of the Android
+   nvdata partition once (mounted read-only, noload). The connsys firmware
+   (`soc1_0_*`, `WIFI_RAM_CODE_soc1_0_1a_1.bin`, `WMT_SOC.cfg`, `wifi.cfg`,
+   `connfem.cfg`) comes from your `vendor` image into `/usr/lib/firmware/`.
+   Order matters: the NVRAM must reach the driver while WiFi is still off.
+   Bluetooth and the modem are still to do.
 3. Package the initramfs hack and the plymouth masks properly (a
    device-specific hook/package instead of patching `postmarketos-initramfs`).
 4. zram/nftables: load or ship the matching GKI modules.

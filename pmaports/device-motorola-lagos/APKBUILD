@@ -2,13 +2,14 @@
 maintainer=""
 pkgname=device-motorola-lagos
 pkgver=1
-pkgrel=5
+pkgrel=6
 pkgdesc="Motorola Moto G06"
 url="https://postmarketos.org"
 arch="aarch64"
 license="MIT"
 depends="
 	android-tools-mkbootimg
+	lagos-wmt
 	linux-motorola-lagos
 	postmarketos-base
 	postmarketos-base-downstream
@@ -31,6 +32,9 @@ source="
 	71-lagos-audio.rules
 	pipewire-lagos-speaker.conf
 	alsa-lagos-skip.conf
+	lagos-wmt.service
+	lagos-wifi.service
+	lagos-wifi-nvram
 	"
 options="!archcheck !check"
 
@@ -64,6 +68,10 @@ package() {
 			"$pkgdir"/usr/lib/systemd/system/$unit.service.d/lagos-skip.conf
 	done
 
+	install -Dm755 "$srcdir"/lagos-wifi-nvram "$pkgdir"/usr/bin/lagos-wifi-nvram
+	install -Dm644 "$srcdir"/lagos-wmt.service "$pkgdir"/usr/lib/systemd/system/lagos-wmt.service
+	install -Dm644 "$srcdir"/lagos-wifi.service "$pkgdir"/usr/lib/systemd/system/lagos-wifi.service
+
 	# No tmpfiles rule creates it on this systemd build; alsactl needs it for its lock
 	install -Dm644 "$srcdir"/lagos-run-lock.conf "$pkgdir"/usr/lib/tmpfiles.d/lagos-run-lock.conf
 	install -Dm644 "$srcdir"/tinydm-lagos-novt.conf \
@@ -76,7 +84,7 @@ e70bae17df23dcaaaea0e2d3616556f04baa23f8ee1357785c0f539bf97282d8ddff53953e155b72
 2f42fc7e5944464ffbb589a9cc1cf844041822c853506a3dee2a9f3948f83b7cd6df3ade39226489fad17acfd4c2ea981ccfaaf1ea7ec1a035c6b03895802eab  lagos-stock.dtb
 73bffbed86114800c1cd155a0808af75db8157827957f5e210499c5460ce15c0b609503e6c83ea005456a4aa80451d86da9fe86f6375a6d1e2d4140092f92edc  lagos-backlight-resend
 9f202acf1c9387cc5bd21a7e4877ca542cfe2752ead60fbd7ce32de00f7de7fcda7da38456bd1605c610c8f593a5da55958045052ee50d35edf34b2a34600eee  lagos-backlight-resend.service
-37a4e499c83da79789abd536fc7456aa252fa791040cb4aecafb2f34594c2f2de93b616fd2ea5f1821a69071c3eb7f1da6732e5f9ea283d0dc590b96baae5e55  90-lagos.preset
+28a0c567aaf597d35ca4e66ddfdf39a89198507c54daf8c0eab8fd3597c2a22c274e432cb4d02060ca726e945b5f142a247d26f987e2fc97789c2ab37a1b9242  90-lagos.preset
 e1bbf1b1defadb6da17845b27e5d07d56eb6bc1bcf2d7ce2d2f583c7053c244e4c04058a846f48f8a01625d26066d06caaf4e0ffc9b3b95d7c5b3c5148d36efe  lagos-mknod
 427ee0fbea1aab71d6e7e633a4962bfb21807d2fb8caaa968a378fbb22150879f01ac1bc3b1160495df5ee448805faad027fa1078b8955cc416cb73a6fc21e66  00-lagos-mknod.rules
 c35f1b121d9ab26cc109581fed5c744c8c4959cec1bb645e779bdac6d4aaedd97ec500bf3d9e8ccf80ef863163a5e8e22b4831709e2bcac44e28f875ec904eb2  lagos-touch.service
@@ -87,4 +95,7 @@ d63fd55063c6a950f3f50ad0b2208a8fceeed4db198f691a3f82eb99b11318d262c14fedc5f0caae
 cee4825eb9d5d3141bba9aad24156380d6ea67ee88e626692925ca953905d25ebfca492753ab5850b99b1c207a30012a565e64b437c1c466ecd5c3bd4d3cea71  71-lagos-audio.rules
 56ce87cad562cffa5cd6c05a996b0340dba79be46d3614dd08f6fc399e98beffc9e22a573a1e427cdb82958f7cd0f08ffcc86e64402a439275f7e78a607d8430  pipewire-lagos-speaker.conf
 31f7dbf68dcbfdd2780fa0d9eeab28fd170186f23a3de9857c274add6211969598a9f401168ceb04bda559a72431971d4875bb4f2dfe3cb7b0524425825ce382  alsa-lagos-skip.conf
+55dbbc67a6e7a35db15a3f636c4694acc4d2362029d042e1e4b9fbe40a28eeca9b2b78a91b0fefd335c7aa82dad88f2bd3ae6378babc40d17a9a8d239c188d7c  lagos-wmt.service
+e2825f0f5ecf7dc9a428105f25d5e8c43cb2276808d0a5aa2fd67ef87bb793d6957548dae656fdc281c2cc61f2df788147928339721ad6a5f39906b91a2a4fe2  lagos-wifi.service
+3e223a9c42eaf4c47f2a910c0a8f29674b0611ebefd7b7991c2d2bf979fc66e372d077f642ee7ef8cf82d63be268c3259567e1e1691a417228716f184123fcbe  lagos-wifi-nvram
 "

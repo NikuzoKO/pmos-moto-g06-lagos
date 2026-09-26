@@ -1,0 +1,22 @@
+pkgname=lagos-wmt
+pkgver=1
+pkgrel=1
+pkgdesc="Open stand-in for MediaTek's Android wmt_loader/wmt_launcher (MT6768 connsys)"
+url="https://github.com/NikuzoKO/pmos-moto-g06-lagos"
+arch="aarch64"
+license="MIT"
+source="lagos-wmt.c"
+makedepends="gcc musl-dev"
+# crossdirect's cc fails to spawn cc1 in the aarch64 build root here
+options="!check !pmb:crossdirect"
+
+build() {
+	${CC:-gcc} $CFLAGS -Wall -o lagos-wmt "$srcdir"/lagos-wmt.c $LDFLAGS
+}
+
+package() {
+	install -Dm755 lagos-wmt "$pkgdir"/usr/bin/lagos-wmt
+}
+sha512sums="
+c181bfe4d00d122f0f8c2add447c96e96ba5c04a0856330613a893bf1e47453637fd9f7addfcce380084b51fa720c37ecce58bcefe007cdafbf5ebc0b610a469  lagos-wmt.c
+"

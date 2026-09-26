@@ -1,0 +1,18 @@
+[Unit]
+Description=MediaTek connsys (WMT) firmware launcher
+# The vendor modules and connsys firmware aren't redistributable (see README)
+ConditionPathExists=/usr/lib/modules/%v/vendor_dlkm/wmt_drv.ko
+ConditionPathExists=/usr/lib/firmware/soc1_0_patch_mcu_1a_1_hdr.bin
+After=systemd-udevd.service
+
+[Service]
+Type=notify
+ExecStartPre=/usr/sbin/modprobe wmt_drv
+ExecStartPre=/usr/bin/lagos-wmt init
+ExecStart=/usr/bin/lagos-wmt launch
+# No stop action on purpose: WMT keeps asking for patches on every connsys
+# power-on, and the driver can't be unloaded cleanly
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target

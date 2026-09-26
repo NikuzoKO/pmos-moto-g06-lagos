@@ -1,3 +1,5 @@
 enable lagos-backlight-resend.service
 enable lagos-touch.service
 enable lagos-audio.service
+enable lagos-wmt.service
+enable lagos-wifi.service
