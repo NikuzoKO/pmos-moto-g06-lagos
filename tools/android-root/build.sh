@@ -33,8 +33,9 @@ mkdir -p "$ROOT/system/bin" "$ROOT/system/lib64" "$ROOT/vendor/bin" \
 cp "$WORK/apex/payload/bin/linker64" "$RUNTIME/bin/"
 ln -s /apex/com.android.runtime/bin/linker64 "$ROOT/system/bin/linker64"
 BINARIES="ccci_mdinit ccci_rpcd fuelgauged fuelgauged_nvram"
-# Loaded with dlopen(), so they aren't in any NEEDED list
-DLOPENED="libfgauge_gm30.so"
+# Loaded with dlopen() (by fuelgauged and libnvram), so they aren't in any
+# NEEDED list
+DLOPENED="libfgauge_gm30.so libcustom_nvram.so"
 for binary in $BINARIES; do
 	cp "$VENDOR/bin/$binary" "$ROOT/vendor/bin/"
 done

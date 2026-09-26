@@ -1,0 +1,26 @@
+#!/bin/sh
+# Prepare /var/lib/lagos/android, the minimal Android root the stock
+# MediaTek daemons run in (see README): bind the kernel filesystems and
+# mount the partitions they read and write where Android's fstab puts them.
+
+set -e
+
+ROOT=/var/lib/lagos/android
+PARTITIONS=/dev/disk/by-partlabel
+
+cd "$ROOT"
+mountpoint -q dev || mount --bind /dev dev
+mountpoint -q proc || mount -t proc proc proc
+mountpoint -q sys || mount --bind /sys sys
+
+mount_partition() {
+	mkdir -p "mnt/vendor/$2"
+	mountpoint -q "mnt/vendor/$2" || mount -t ext4 "$PARTITIONS/$1" "mnt/vendor/$2"
+}
+
+mount_partition nvdata nvdata
+mount_partition nvcfg nvcfg
+mount_partition protect1 protect_f
+mount_partition protect2 protect_s
+mount_partition persist persist
+mkdir -p data/vendor/mdlpm data/vendor/md3 data/vendor_de/md

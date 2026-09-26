@@ -1,0 +1,9 @@
+#!/bin/sh
+# Run a stock Android binary in /var/lib/lagos/android (prepared by
+# lagos-android-root.service) under Android's linker.
+# libpropshim.so stands in for Android's property service.
+exec env -i \
+	LD_LIBRARY_PATH=/vendor/lib64:/system/lib64 \
+	LD_PRELOAD=libpropshim.so \
+	PATH=/vendor/bin:/system/bin \
+	/usr/sbin/chroot /var/lib/lagos/android "$@"

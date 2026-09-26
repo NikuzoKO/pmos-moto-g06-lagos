@@ -171,14 +171,17 @@ Extract them from your own device.
    Copy `spk-fs1800.bin` from your `vendor` firmware to `/usr/lib/firmware/`.
    `lagos-audio.service` then loads the card and `lagos-audio-setup` routes it
    to the bottom speaker.
-8. Modem: build the Android root with
+8. Modem and battery gauge: build the Android root with
    `tools/android-root/build.sh <vendor dir> <system dir> android-root.tar.gz`
    from your own extracted `vendor_a` and `system_a` images, then
    `tar -C /var/lib/lagos -xzf android-root.tar.gz` on the phone.
    `lagos-modem.service` is skipped until it exists. **Back up `nvdata`,
    `nvcfg`, `protect1`, `protect2`, `persist`, `proinfo` and `nvram` first**:
    the modem writes its own NVRAM files there, and they hold the IMEI and RF
-   calibration.
+   calibration. The same root runs MediaTek's `fuelgauged`: the GM3.0 gauge
+   algorithm lives in userspace, and without it the battery reads capacity
+   -1. **Don't run upower without it**: upower takes -1 as an empty battery
+   and powers the phone off (its drop-in now requires `lagos-fuelgauged`).
 
 ## Next steps
 

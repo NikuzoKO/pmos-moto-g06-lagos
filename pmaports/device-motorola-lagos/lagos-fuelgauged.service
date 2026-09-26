@@ -1,0 +1,19 @@
+[Unit]
+Description=MediaTek battery gauge daemon (stock fuelgauged)
+# The GM3.0 gauge algorithm runs in userspace: without it the battery's
+# capacity reads -1 (and upower would take that as an empty battery)
+ConditionPathExists=/var/lib/lagos/android/vendor/bin/fuelgauged
+Requires=lagos-android-root.service
+After=lagos-android-root.service
+Before=upower.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/lagos-android-run /vendor/bin/fuelgauged
+# Only count as started once the gauge reports a capacity
+ExecStartPost=/bin/sh -c 'for i in $(seq 60); do [ "$(cat /sys/class/power_supply/battery/capacity)" != "-1" ] && exit 0; sleep 0.5; done; exit 1'
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
