@@ -1,0 +1,150 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: MIT
+# Volume/brightness overlay for sxmo, in place of wob: a rounded vertical bar
+# with the percentage under it, in the top right corner. Reads the same input
+# wob does (one number per line on stdin, from sxmo_ob.sh's fifo), so
+# ~/.config/superd/services/sxmo_wob.service just points sxmo_ob.sh here.
+
+import math
+import sys
+
+import cairo
+import gi
+
+gi.require_version("Gtk", "3.0")
+gi.require_version("GtkLayerShell", "0.1")
+from gi.repository import GLib, Gtk, GtkLayerShell  # noqa: E402
+
+# Logical pixels (sway scales them)
+CARD_WIDTH = 56
+CARD_HEIGHT = 200
+CARD_RADIUS = 18
+BAR_WIDTH = 14
+BAR_HEIGHT = 140
+BAR_TOP = 16
+TEXT_SIZE = 15
+MARGIN_TOP = 16
+MARGIN_RIGHT = 12
+HIDE_AFTER_MS = 1500
+
+CARD_COLOR = (0.08, 0.08, 0.09, 0.78)
+TRACK_COLOR = (1.0, 1.0, 1.0, 0.22)
+FILL_COLOR = (1.0, 1.0, 1.0, 0.95)
+TEXT_COLOR = (1.0, 1.0, 1.0, 0.95)
+
+
+def rounded_rectangle(context, x, y, width, height, radius):
+    radius = min(radius, width / 2, height / 2)
+    context.new_sub_path()
+    context.arc(x + width - radius, y + radius, radius, -math.pi / 2, 0)
+    context.arc(x + width - radius, y + height - radius, radius, 0, math.pi / 2)
+    context.arc(x + radius, y + height - radius, radius, math.pi / 2, math.pi)
+    context.arc(x + radius, y + radius, radius, math.pi, 3 * math.pi / 2)
+    context.close_path()
+
+
+class VolumeOverlay(Gtk.Window):
+    def __init__(self):
+        super().__init__()
+        self.percent = 0
+        self.hide_timer = None
+
+        GtkLayerShell.init_for_window(self)
+        GtkLayerShell.set_layer(self, GtkLayerShell.Layer.OVERLAY)
+        GtkLayerShell.set_anchor(self, GtkLayerShell.Edge.TOP, True)
+        GtkLayerShell.set_anchor(self, GtkLayerShell.Edge.RIGHT, True)
+        GtkLayerShell.set_margin(self, GtkLayerShell.Edge.TOP, MARGIN_TOP)
+        GtkLayerShell.set_margin(self, GtkLayerShell.Edge.RIGHT, MARGIN_RIGHT)
+        GtkLayerShell.set_keyboard_mode(self, GtkLayerShell.KeyboardMode.NONE)
+        GtkLayerShell.set_namespace(self, "lagos-volume-osd")
+
+        self.set_size_request(CARD_WIDTH, CARD_HEIGHT)
+        self.set_app_paintable(True)
+        visual = self.get_screen().get_rgba_visual()
+        if visual:
+            self.set_visual(visual)
+
+        area = Gtk.DrawingArea()
+        area.connect("draw", self.on_draw)
+        self.add(area)
+        self.connect("realize", self.on_realize)
+
+    def on_realize(self, _window):
+        # Let touches go through to whatever is underneath
+        self.input_shape_combine_region(cairo.Region())
+
+    def on_draw(self, _area, context):
+        context.set_operator(cairo.OPERATOR_SOURCE)
+        context.set_source_rgba(0, 0, 0, 0)
+        context.paint()
+        context.set_operator(cairo.OPERATOR_OVER)
+
+        context.set_source_rgba(*CARD_COLOR)
+        rounded_rectangle(context, 0, 0, CARD_WIDTH, CARD_HEIGHT, CARD_RADIUS)
+        context.fill()
+
+        bar_x = (CARD_WIDTH - BAR_WIDTH) / 2
+        context.set_source_rgba(*TRACK_COLOR)
+        rounded_rectangle(context, bar_x, BAR_TOP, BAR_WIDTH, BAR_HEIGHT, BAR_WIDTH / 2)
+        context.fill()
+
+        # Fills from the bottom; clip to the track so small values stay rounded
+        fill_height = BAR_HEIGHT * max(0, min(self.percent, 100)) / 100
+        if fill_height > 0:
+            context.save()
+            rounded_rectangle(context, bar_x, BAR_TOP, BAR_WIDTH, BAR_HEIGHT, BAR_WIDTH / 2)
+            context.clip()
+            context.set_source_rgba(*FILL_COLOR)
+            context.rectangle(bar_x, BAR_TOP + BAR_HEIGHT - fill_height, BAR_WIDTH, fill_height)
+            context.fill()
+            context.restore()
+
+        label = f"{self.percent}%"
+        context.select_font_face("sans-serif", cairo.FONT_SLANT_NORMAL, cairo.FONT_WEIGHT_BOLD)
+        context.set_font_size(TEXT_SIZE)
+        extents = context.text_extents(label)
+        text_area_top = BAR_TOP + BAR_HEIGHT
+        text_area_height = CARD_HEIGHT - text_area_top
+        context.move_to((CARD_WIDTH - extents.width) / 2 - extents.x_bearing,
+                        text_area_top + (text_area_height - extents.height) / 2 - extents.y_bearing)
+        context.set_source_rgba(*TEXT_COLOR)
+        context.show_text(label)
+        return False
+
+    def show_percent(self, percent):
+        self.percent = percent
+        self.queue_draw()
+        self.show_all()
+        if self.hide_timer:
+            GLib.source_remove(self.hide_timer)
+        self.hide_timer = GLib.timeout_add(HIDE_AFTER_MS, self.on_hide_timer)
+
+    def on_hide_timer(self):
+        self.hide_timer = None
+        self.hide()
+        return False
+
+
+def main():
+    overlay = VolumeOverlay()
+
+    def on_input(source, _condition):
+        line = source.readline()
+        if not line:
+            Gtk.main_quit()
+            return False
+        # wob's format: a number, optionally followed by colors; sxmo sends
+        # plain numbers (and "muted" as 0)
+        word = line.split()[0] if line.split() else ""
+        try:
+            overlay.show_percent(round(float(word)))
+        except ValueError:
+            pass
+        return True
+
+    GLib.io_add_watch(sys.stdin, GLib.PRIORITY_DEFAULT, GLib.IO_IN | GLib.IO_HUP, on_input)
+    Gtk.main()
+
+
+if __name__ == "__main__":
+    main()

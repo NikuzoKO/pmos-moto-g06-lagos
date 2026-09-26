@@ -1,0 +1,9 @@
+# Copy to ~/.config/services/ (superd's user service directory) to replace
+# sxmo's wob with lagos-volume-osd (installed to ~/.local/bin)
+[Unit]
+Description=Volume/brightness overlay (lagos-volume-osd instead of wob)
+
+[Service]
+Type=simple
+Restart=always
+ExecStart=/usr/bin/sxmo_ob.sh /home/nikuzo/.local/bin/lagos-volume-osd
