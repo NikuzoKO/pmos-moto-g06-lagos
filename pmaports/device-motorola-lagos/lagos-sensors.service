@@ -1,0 +1,21 @@
+[Unit]
+Description=Load the MT6768 sensor hub (SCP) drivers in stock order
+# The sensors run on the SCP coprocessor; Linux talks to them through
+# MediaTek's sensorHub. sensor_probe initialises every sensor class that is
+# registered by then, so it must come last, as in the stock modules.load
+ConditionPathExists=/usr/lib/modules/%v/vendor_dlkm/sensorHub.ko
+After=systemd-udevd.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/modprobe -a ccci_fsm_scp sensorHub sensor_list \
+	accel_common accelhub gyro_common gyrohub mag_common maghub \
+	situationhub alsps_common alspshub baro_common barohub \
+	step_counter stepsignhub situation rotatvechub gamerotvechub \
+	gmagrotvechub gravityhub linearacchub orienthub uncali_acchub \
+	uncali_gyrohub uncali_maghub fusion
+ExecStart=/usr/sbin/modprobe sensor_probe
+
+[Install]
+WantedBy=multi-user.target

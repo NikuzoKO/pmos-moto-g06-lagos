@@ -1,0 +1,14 @@
+[Unit]
+Description=Bridge the MT6768 sensor hub to input devices (accelerometer, proximity)
+Requires=lagos-sensors.service
+After=lagos-sensors.service
+Before=iio-sensor-proxy.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/lagos-sensord
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

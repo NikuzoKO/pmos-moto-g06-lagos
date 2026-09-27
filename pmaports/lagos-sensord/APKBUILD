@@ -1,0 +1,26 @@
+pkgname=lagos-sensord
+pkgver=1
+pkgrel=0
+pkgdesc="Bridge the MT6768 (SCP) sensor hub to Linux input devices for iio-sensor-proxy"
+url="https://github.com/NikuzoKO/pmos-moto-g06-lagos"
+arch="aarch64"
+license="MIT"
+depends="iio-sensor-proxy"
+source="lagos-sensord.c lagos-sensord.service"
+makedepends="gcc musl-dev linux-headers"
+# crossdirect's cc fails to spawn cc1 in the aarch64 build root here
+options="!check !pmb:crossdirect"
+
+build() {
+	${CC:-gcc} $CFLAGS -Wall -o lagos-sensord "$srcdir"/lagos-sensord.c $LDFLAGS
+}
+
+package() {
+	install -Dm755 lagos-sensord "$pkgdir"/usr/bin/lagos-sensord
+	install -Dm644 "$srcdir"/lagos-sensord.service \
+		"$pkgdir"/usr/lib/systemd/system/lagos-sensord.service
+}
+sha512sums="
+66a72a87ca2533e2541c68cd5c22379a848dd3054b3e8384beb903e2136f1e9aedfe50068005beac666fecc6f0f136cb795280584f6d5e25538c34f6b4705a21  lagos-sensord.c
+f9b883467b6baad57b9da243a74c955151e143c275ff236477d60801ea7620deded2cfc32d38207985cb4737126aedd30a0b70e8f31953dbe8bd4893fe91a578  lagos-sensord.service
+"
