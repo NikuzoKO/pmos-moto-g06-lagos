@@ -4,7 +4,7 @@ Work-in-progress postmarketOS port for the Motorola Moto G06 / G06 Power
 (`lagos`, XT2535-x), MediaTek Helio G81 Ultra (**MT6768**, same die as the
 Galaxy A31's "Helio P65").
 
-## Status (2026-09-24 night)
+## Status (2026-09-27)
 
 | Area | State |
 |---|---|
@@ -16,9 +16,19 @@ Galaxy A31's "Helio P65").
 | initramfs → rootfs | ✅ `switch_root` into the pmOS rootfs, systemd reaches a (degraded) running state |
 | SSH | ✅ `ssh user@172.16.42.1`. **~29s from reboot to SSH, no manual steps** (with plymouth masked, see below) |
 | Display | ✅ KMS scanout works (verified with modetest color bars). Vendor MTK DRM (`mediatek`, DSI-1 720x1640, Tianma icnl9916x panel). **Gotcha:** the backlight is a DSI command (`tianma_setbacklight_cmdq`), and the LED core only sends it when `/sys/class/leds/lcd-backlight/brightness` *changes*. After a modeset re-powers the panel, write a different brightness value or the screen stays dark. No fbdev (`/dev/fb0`), no `/sys/class/backlight`. Debug: `echo mobile:on > /sys/kernel/debug/mtkfb; echo diagnose > /sys/kernel/debug/mtkfb` dumps the full DDP state to dmesg |
-| Touch, audio, modem, WiFi/BT, battery | ❌ Not attempted yet |
+| UI | ✅ sxmo (sway) on the pixman renderer (no GPU yet), Rosé Pine theme in `extras/theme/` |
+| Touch | ✅ Chipone ICNL9916X TDDI, survives panel off/on |
+| Audio | ✅ Bottom speaker, main mic (PipeWire); earpiece works by hand, not routed yet; headset jack only notifies |
+| WiFi / Bluetooth | ✅ Both, with open replacements for the Android WMT daemons (`lagos-wmt`); BlueZ A2DP |
+| Modem | ✅ Boots with stock `ccci_mdinit`/`ccci_rpcd` in a chroot; ModemManager (patched) sees it. Calls/SMS/data untested (no SIM yet) |
+| Battery | ✅ Percentage via stock `fuelgauged`; upower |
+| Suspend | ✅ Deep sleep under sxmo, WiFi stays associated (Wake-on-WLAN + firmware suspend mode), wakes on the power key |
+| Lock screen | ✅ peanutbutter with a visible pattern mode (`pmaports/peanutbutter`) |
+| Sensors | ✅ Accelerometer (rotation) and proximity via `lagos-sensord` → iio-sensor-proxy. No gyro/compass on this model; light not exposed yet |
+| Firewall, zram | ✅ pmOS rules on legacy iptables (no nf_tables in the stock kernel); zram swap |
+| Not yet | GPU, camera, fingerprint, calls/SMS/data (needs a SIM) |
 | Watchdog | ✅ Fed by stock `mtk_wdt.ko` (no more resets) |
-| Known failed units | `getty@tty1` (no VT), `nftables`, `postmarketos-zram-swap` (modules not loaded). All harmless |
+| Known failed units | None |
 
 Tested on slot A only. **Slot B is unusable on the test unit**: it black-screen
 bootloops even with stock firmware, and its `system_b` is only ~11.6 MB.

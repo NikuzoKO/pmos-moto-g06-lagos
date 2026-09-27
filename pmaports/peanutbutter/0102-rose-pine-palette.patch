@@ -1,0 +1,75 @@
+From ebda3d02ab7512d3adaa84417c5aae3a5a1584ed Mon Sep 17 00:00:00 2001
+From: nikuzo <buelaniki@gmail.com>
+Date: Sun, 27 Sep 2026 01:34:43 -0300
+Subject: [PATCH] =?UTF-8?q?Draw=20with=20the=20Ros=C3=A9=20Pine=20palette?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Base background, text-coloured clock and status, iris dots and lines,
+love for a wrong pattern and the deep lock, instead of black, white and
+pure red.
+---
+ src/draw.rs | 24 +++++++++++++++++-------
+ 1 file changed, 17 insertions(+), 7 deletions(-)
+
+diff --git a/src/draw.rs b/src/draw.rs
+index 70f87f4..4d996e6 100644
+--- a/src/draw.rs
++++ b/src/draw.rs
+@@ -10,6 +10,16 @@ use wayland_client::protocol::wl_shm;
+ 
+ use crate::wayland_protocol::State;
+ 
++// Rosé Pine (https://rosepinetheme.com)
++const BASE: (f64, f64, f64) = (0x19 as f64 / 255.0, 0x17 as f64 / 255.0, 0x24 as f64 / 255.0);
++const TEXT: (f64, f64, f64) = (0xe0 as f64 / 255.0, 0xde as f64 / 255.0, 0xf4 as f64 / 255.0);
++const IRIS: (f64, f64, f64) = (0xc4 as f64 / 255.0, 0xa7 as f64 / 255.0, 0xe7 as f64 / 255.0);
++const LOVE: (f64, f64, f64) = (0xeb as f64 / 255.0, 0x6f as f64 / 255.0, 0x92 as f64 / 255.0);
++
++fn set_color(context: &cairo::Context, (red, green, blue): (f64, f64, f64)) {
++    context.set_source_rgb(red, green, blue);
++}
++
+ impl State {
+     pub fn draw(&mut self) {
+         if self.debug {
+@@ -41,18 +51,18 @@ impl State {
+         let permalocked = self.touch_state.as_ref().is_some_and(|state| state.permalocked())
+             || self.pattern.as_ref().is_some_and(|pattern| pattern.permalocked());
+         if permalocked {
+-            context.set_source_rgb(1.0, 0.0, 0.0);
++            set_color(&context, LOVE);
+         } else if self.inverted {
+-            context.set_source_rgb(1.0, 1.0, 1.0);
++            set_color(&context, TEXT);
+         } else {
+-            context.set_source_rgb(0.0, 0.0, 0.0);
++            set_color(&context, BASE);
+         }
+         // paint background colour
+         context.paint().unwrap();
+         if self.inverted {
+-            context.set_source_rgb(0.0, 0.0, 0.0);
++            set_color(&context, BASE);
+         } else {
+-            context.set_source_rgb(1.0, 1.0, 1.0);
++            set_color(&context, TEXT);
+         }
+ 
+         // draw status line
+@@ -140,9 +150,9 @@ impl State {
+         let scale = self.scale as f64;
+         let spacing = pattern.spacing() * scale;
+         if pattern.failed() {
+-            context.set_source_rgb(0.9, 0.2, 0.2);
++            set_color(context, LOVE);
+         } else {
+-            context.set_source_rgb(1.0, 1.0, 1.0);
++            set_color(context, IRIS);
+         }
+ 
+         let points = pattern.path_points();
+-- 
+2.55.0
+

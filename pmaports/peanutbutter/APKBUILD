@@ -1,11 +1,12 @@
 # Forked from Alpine aports community/peanutbutter for the Moto G06 (lagos):
-# 0100-*.patch adds a visible swipe-pattern lock (-P). Keep pkgver in sync
+# 0100-*.patch adds a visible swipe-pattern lock (-P), 0102 the Rosé Pine
+# palette of the desktop. Keep pkgver in sync
 # with Alpine; pkgrel stays above theirs.
 # Contributor: Anjandev Momi <anjan@momi.ca>
 # Maintainer: Anjandev Momi <anjan@momi.ca>
 pkgname=peanutbutter
 pkgver=0.5.1
-pkgrel=102
+pkgrel=103
 pkgdesc="A lock screen for linux mobile - specially designed for Sxmo (sway edition)"
 url="https://git.sr.ht/~anjan/peanutbutter"
 arch="all"
@@ -15,6 +16,7 @@ subpackages="$pkgname-doc"
 source="$pkgname-$pkgver.tar.gz::https://git.sr.ht/~anjan/peanutbutter/archive/$pkgver.tar.gz
 	0100-pattern-lock-mode.patch
 	0101-session-lock-finished.patch
+	0102-rose-pine-palette.patch
 	"
 # crossdirect's cc can't spawn cc1 in this buildroot
 options="!check !pmb:crossdirect"
@@ -44,4 +46,5 @@ sha512sums="
 2abf4599eb6e53584c49c4b3d0d548b60e9b5793d2fbf94542f09fa1e27e60d7aa110502ba18f5a8bc6b0afb601eb8a4d89045b93283072c4327583381e4a0b3  peanutbutter-0.5.1.tar.gz
 dca8938b3d526251eadd722f6a6890408e07df54e8ef0d4b8efb7c4a45c4fc89e4d758aad7b84fff83bb288b342f7d5cb8eecde509321f023ddd35ec84459f20  0100-pattern-lock-mode.patch
 fe397371db5736ba5dc8bda469fd8bac16163f9ceee8d07b7f4a1edb2946b1eec969e8e4057a257270dcde19c835824658565a348b8bed55879a02ebe9931278  0101-session-lock-finished.patch
+d0ae6eb8506383ee23f232756cfdb0e0935857f72becdc84568cbf1f81d04021ae34b39f3dee46a6d1c830599d3db7bf57e656113c4bb6bcc5589eb3f819b18f  0102-rose-pine-palette.patch
 "

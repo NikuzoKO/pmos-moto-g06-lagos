@@ -32,10 +32,11 @@ FADE_IN_MS = 180
 FADE_OUT_MS = 350
 BAR_ANIMATION_MS = 220
 
-CARD_COLOR = (0.08, 0.08, 0.09, 0.78)
-TRACK_COLOR = (1.0, 1.0, 1.0, 0.22)
-FILL_COLOR = (1.0, 1.0, 1.0, 0.95)
-TEXT_COLOR = (1.0, 1.0, 1.0, 0.95)
+# Rosé Pine, matching the desktop
+CARD_COLOR = (0.098, 0.090, 0.141, 0.88)  # base
+TRACK_COLOR = (0.251, 0.239, 0.322, 0.95)  # highlight med
+FILL_COLOR = (0.769, 0.655, 0.906, 1.0)  # iris
+TEXT_COLOR = (0.878, 0.871, 0.957, 1.0)  # text
 
 
 def rounded_rectangle(context, x, y, width, height, radius):
@@ -144,7 +145,7 @@ class VolumeOverlay(Gtk.Window):
             context.restore()
 
         label = f"{self.percent}%"
-        context.select_font_face("sans-serif", cairo.FONT_SLANT_NORMAL, cairo.FONT_WEIGHT_BOLD)
+        context.select_font_face("Space Grotesk", cairo.FONT_SLANT_NORMAL, cairo.FONT_WEIGHT_BOLD)
         context.set_font_size(TEXT_SIZE)
         extents = context.text_extents(label)
         text_area_top = BAR_TOP + BAR_HEIGHT
