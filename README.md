@@ -279,6 +279,16 @@ Extract them from your own device.
    itself; incoming traffic on `ccmni*` (mobile data) is dropped like on
    `wwan*`. zram is loaded explicitly, and its service waits for
    `/dev/zram0` (no devtmpfs: udev creates the node a moment later).
+5. Waydroid (LineageOS 20 GAPPS) boots with `pmaports/waydroid`, Alpine's
+   package plus a patch. The stock kernel has no PID, IPC, user or cgroup
+   namespaces, so the container shares the host's, mounts cgroup2 rw and
+   gets a prebuilt `cgroup.rc` (libprocessgroup only writes it as PID 1).
+   lmkd is forced to its new strategy (the old one needs cgroup v1), and
+   the missing xt_CHECKSUM rule is tolerated. `kernel.pid_max` is capped
+   at 32768: Android shares the host PID space, and 32-bit bionic mutexes
+   keep a 16-bit owner TID, so a PID above 65535 deadlocks early init.
+   A container stop leaves Android's userspace running (no PID namespace
+   to tear down); run `waydroid-reap` after every stop.
 
 ## Prior art
 

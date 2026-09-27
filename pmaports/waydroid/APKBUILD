@@ -1,0 +1,91 @@
+# Forked from Alpine aports community/waydroid for the Moto G06 (lagos). The
+# stock GKI kernel has no PID, IPC, user or cgroup namespaces:
+# 0100-*.patch shares the host namespaces, mounts cgroup2 rw, hands Android a
+# prebuilt cgroup map (cgroup.rc; libprocessgroup only builds it as PID 1),
+# tolerates the missing xt_CHECKSUM and forces lmkd's new strategy.
+# pid_max is capped at 32768 (32-bit bionic mutexes keep a 16-bit owner TID).
+# A container stop leaves Android's userspace running: run waydroid-reap after.
+# Keep pkgver in sync with Alpine; pkgrel stays above theirs.
+maintainer="Bart Ribbers <bribbers@disroot.org>"
+pkgname=waydroid
+pkgver=1.6.3
+pkgrel=100
+pkgdesc="A container-based approach to boot a full Android system on a regular Linux system"
+url="https://github.com/waydroid/waydroid"
+# Only x86, armv7, x86_64 and aarch64 supported upstream
+arch="noarch !armhf !ppc64le !s390x"
+license="GPL-3.0-only"
+depends="
+	dnsmasq
+	gbinder-python
+	iptables
+	kmod
+	lxc
+	py3-dbus
+	py3-gobject3
+	py3-pyclip
+	python3
+	"
+makedepends="coreutils"
+triggers="$pkgname.trigger=/usr/share/waydroid-extra/images"
+install="$pkgname.post-upgrade"
+subpackages="
+	$pkgname-openrc
+	$pkgname-pyc
+	$pkgname-nftrules::noarch
+	$pkgname-systemd
+	"
+source="https://github.com/waydroid/waydroid/archive/$pkgver/waydroid-$pkgver.tar.gz
+	waydroid-container.initd
+	waydroid-container.confd
+	51_waydroid.nft
+	waydroid-session.desktop
+	0100-lagos-no-pid-namespace.patch
+	cgroup.rc
+	waydroid-reap.sh
+	60-waydroid-pid-max.conf
+	"
+options="!check" # No tests
+
+package() {
+	make DESTDIR="$pkgdir" USE_SYSTEMD=1 USE_NFTABLES=1 install
+
+	# Generate __pycache__ packaging time instead of runtime
+	python -m compileall "$pkgdir"/usr/lib/waydroid/tools
+
+	install -Dm644 -t "$pkgdir"/etc/xdg/autostart "$srcdir"/waydroid-session.desktop
+
+	install -Dm755 "$srcdir"/waydroid-container.initd "$pkgdir"/etc/init.d/waydroid-container
+	install -Dm644 "$srcdir"/waydroid-container.confd "$pkgdir"/etc/conf.d/waydroid-container
+
+	install -Dm644 "$srcdir"/51_waydroid.nft \
+		"$pkgdir"/usr/share/nftables.avail/51_waydroid.nft
+
+	# cgroup.rc (Android 13 format): u32 version=1, u32 count, then per
+	# controller u32 version, u32 flags (1 = mounted), char name[16],
+	# char path[32]; entries: cgroup2 and freezer, both at /sys/fs/cgroup
+	install -Dm644 "$srcdir"/cgroup.rc \
+		"$pkgdir"/usr/lib/waydroid/data/cgroup_info/cgroup.rc
+	install -Dm755 "$srcdir"/waydroid-reap.sh "$pkgdir"/usr/bin/waydroid-reap
+	install -Dm644 -t "$pkgdir"/usr/lib/sysctl.d "$srcdir"/60-waydroid-pid-max.conf
+}
+
+pyc() {
+	default_pyc
+
+	cd "$pkgdir"
+	local IFS=$'\n'
+	amove $(find usr/lib/waydroid -type d -name __pycache__)
+}
+
+sha512sums="
+e395b0eed9bfda3cb7b0ab8de5e8d69c57188c86b810c76fccd6a9dea2179acf219b41338382a923d0f4cfbb276064d7336c0771ba54c6ef14e8496250a3acfa  waydroid-1.6.3.tar.gz
+f319dde4f4bb365069dff2c1ddaa0a85d711c9e9d49011b15aec0d10da2ba0da39c464505d28cd7e8b4f803e932fdde04ca69602805d084529bac0ee6b22ba59  waydroid-container.initd
+b841282b96110ec59a7aa539db0737327b09549d55c78dc4b2c3b28b4a6ad1facf015b3175cb6d3a38f13e47aa6314ef3dc1514a4e60dd653a97409ec54ba706  waydroid-container.confd
+27cec579cfda197ff70d6328043755fc3d1719347bf4987edb86a07341bc4f02b99b65a6ef1fcde58b48a925176e6d770ed7cef304edff6a860bf4d408a62e06  51_waydroid.nft
+1848bf6b63ed51c635190c134ec3b0b1345915c13a3b721ea7dde44cb5808e632237bdba2ae12e6a9ba2f8978c07715998c357eb5bd7b7caff9d41142bae27e8  waydroid-session.desktop
+2234111b0f755208e9494da928d45f13b5c1bb7d4b4701fa0ac0970185eaa016bb712e805c83e4aebbe8bfdd5b3c2c63273d8054d37a7822bf8f381f38822ce0  0100-lagos-no-pid-namespace.patch
+288d5f443cba17e8b20195b7a6109c0ca99de6ae2981c30deae9d359037c17ba44241d01ca17a5f57fa1628c416fd3fa486d06d3f4b2ca10da3901075cb575ca  cgroup.rc
+0b389e97eb2086b2c1f13ea63ad5277dc8bdeaba298baa164f8f64fbe879e241b14eebe592ea11f534fd4f2c3a49c18d51e1ff8eb71f55a69870753073a29e98  waydroid-reap.sh
+0f3624c68e5f0e154992ab8a02e63256cf1a904aae4856995d6ffd0efeca3b06b4fd9b5a61a7b3df0e8adc8cedd50a6d449fc43350de5c7abc73fa7869c2ed48  60-waydroid-pid-max.conf
+"
