@@ -255,13 +255,11 @@ for_window [app_id="foot" title=".*sxmo/modem/.*/draft.txt.*"] resize set height
 for_window [title="megapixels"] inhibit_idle open
 for_window [title="ep[yr].*"] inhibit_idle visible
 
-# Like the desktop: no borders, small gaps that show the wallpaper
+# Like the desktop: no borders, no gaps
 default_border none
 default_floating_border pixel 2
 titlebar_border_thickness 2
 hide_edge_borders smart
-gaps inner 5
-gaps outer 6
 
 # Rosé Pine: border, background, text, indicator, child border
 client.focused          #c4a7e7 #191724 #e0def4 #c4a7e7 #c4a7e7

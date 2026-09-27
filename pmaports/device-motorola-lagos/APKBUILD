@@ -2,7 +2,7 @@
 maintainer=""
 pkgname=device-motorola-lagos
 pkgver=1
-pkgrel=22
+pkgrel=23
 pkgdesc="Motorola Moto G06"
 url="https://postmarketos.org"
 arch="aarch64"
@@ -56,6 +56,8 @@ source="
 	lagos-modem
 	lagos-modem.service
 	lagos-sensors.service
+	lagos-appstream.service
+	lagos-appstream.timer
 	78-lagos-modem.rules
 	sxmo-deviceprofile-lagos.sh
 	"
@@ -121,6 +123,10 @@ package() {
 	install -Dm644 "$srcdir"/lagos-modem.service "$pkgdir"/usr/lib/systemd/system/lagos-modem.service
 	install -Dm644 "$srcdir"/lagos-sensors.service \
 		"$pkgdir"/usr/lib/systemd/system/lagos-sensors.service
+	install -Dm644 "$srcdir"/lagos-appstream.service \
+		"$pkgdir"/usr/lib/systemd/system/lagos-appstream.service
+	install -Dm644 "$srcdir"/lagos-appstream.timer \
+		"$pkgdir"/usr/lib/systemd/system/lagos-appstream.timer
 	install -Dm644 "$srcdir"/78-lagos-modem.rules "$pkgdir"/usr/lib/udev/rules.d/78-lagos-modem.rules
 
 	# sxmo finds it by the first DT compatible; abuild won't take a comma in
@@ -140,7 +146,7 @@ e70bae17df23dcaaaea0e2d3616556f04baa23f8ee1357785c0f539bf97282d8ddff53953e155b72
 2f42fc7e5944464ffbb589a9cc1cf844041822c853506a3dee2a9f3948f83b7cd6df3ade39226489fad17acfd4c2ea981ccfaaf1ea7ec1a035c6b03895802eab  lagos-stock.dtb
 368fefda06184c905a6d948a24ac1dde1d1cf9e99c62a6dbb97782b75d4a970bf3b82e99eeae16c0dba3184fe49da0a6394cf7c2dd542974e99ae40b29caba90  lagos-backlight-resend
 aee9a1aa74d0ff0a15d08d9a41bf94b573564a5d883a7b91b9dc00a7557007c607a1da0277adb36f21c35402326ef2e52bda63919ec0611da05877e0dab32c4b  lagos-backlight-resend.service
-0a658db0352b1b14a6da788fd991bb13e15fbd09f2b43e1bf24c2326594d740298f901112df76d24c2f8a6bf936dba0ffd0bd73868343e5494466116a480d0b6  90-lagos.preset
+6bcd389bdff7a604b1449f21b783e5cbffb40bad3c62050730190bcf32c6a4e50fc9d145f686affe2c76a0ed54a5698d0b7b7ebeefc8d2ac248811d687f3feab  90-lagos.preset
 e1bbf1b1defadb6da17845b27e5d07d56eb6bc1bcf2d7ce2d2f583c7053c244e4c04058a846f48f8a01625d26066d06caaf4e0ffc9b3b95d7c5b3c5148d36efe  lagos-mknod
 427ee0fbea1aab71d6e7e633a4962bfb21807d2fb8caaa968a378fbb22150879f01ac1bc3b1160495df5ee448805faad027fa1078b8955cc416cb73a6fc21e66  00-lagos-mknod.rules
 c35f1b121d9ab26cc109581fed5c744c8c4959cec1bb645e779bdac6d4aaedd97ec500bf3d9e8ccf80ef863163a5e8e22b4831709e2bcac44e28f875ec904eb2  lagos-touch.service
@@ -172,6 +178,8 @@ e63d2d1ea361b978e46bb0bbfa776d73c7f4b4209e30cf646af143ab0ab8c6a545f53519fcb0d276
 08b527a0254a35e2ffbc4b05016ef96fa3ec72862c61514ee5dde2b145933795ec083612dcaeb11e4ddd9f534c4cf5d6e05e1f2b3548ff725cb097893b825679  lagos-modem
 1be73adbc8b6b7d8b448b03a8a58044d58268f148f2e2338b91e7ac9360b22cbf54806bd19ce94722b349299a4673c04f58f73afdec7ea434495dbb90dbe503c  lagos-modem.service
 69b81bdec979912f47ea5a6c940ea22de03d962fc219dbb21f76e998d4863e473042b6c5051f8fafa717cc9b0150222485274c48f84e5604c9b90777aa5cd4f4  lagos-sensors.service
+e21c457032185268f50f6350942df7c59cee9b7398c33fa314d630261cc8a3aa4a310cf1e0b4c5d57953a837081bcf332aa9783d43d9b8b42881e9f116ecd11c  lagos-appstream.service
+8b4b62671d51c3f3636e6a06e1293326b2ae378054e71c4d371c863c05c3b7385521b7ec483cab017de716a44f181d4332abca2ebf822d1c5badc3e370be63e3  lagos-appstream.timer
 c58c66e5ec0ab682d710f54ba2c6ae0360c61ced7bf947dd415ac4fb3c29dfd0c6deb27e7c4cbcc11b1d3c3772ddfa076ece01e9aeda393b4644b5688b8a82a7  78-lagos-modem.rules
 24fe048f20542c2561a89be82474a89c1db34a38db556e63f794085bc36bf3ea0745c7fcc6cdb4f05fd408851416105cf6463818b0705e4f73f197ec9cc9c11f  sxmo-deviceprofile-lagos.sh
 "

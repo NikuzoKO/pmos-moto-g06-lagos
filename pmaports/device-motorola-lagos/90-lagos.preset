@@ -10,3 +10,4 @@ enable lagos-fuelgauged.service
 enable lagos-firewall.service
 enable lagos-sensors.service
 enable lagos-sensord.service
+enable lagos-appstream.timer

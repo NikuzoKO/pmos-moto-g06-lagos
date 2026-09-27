@@ -1,0 +1,9 @@
+[Unit]
+Description=Refresh the app catalogue for GNOME Software (Alpine AppStream)
+ConditionPathExists=/usr/sbin/alpine-appstream-downloader
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/sbin/alpine-appstream-downloader

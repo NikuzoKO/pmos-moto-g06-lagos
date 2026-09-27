@@ -145,7 +145,7 @@ class VolumeOverlay(Gtk.Window):
             context.restore()
 
         label = f"{self.percent}%"
-        context.select_font_face("Space Grotesk", cairo.FONT_SLANT_NORMAL, cairo.FONT_WEIGHT_BOLD)
+        context.select_font_face("Roboto Mono", cairo.FONT_SLANT_NORMAL, cairo.FONT_WEIGHT_BOLD)
         context.set_font_size(TEXT_SIZE)
         extents = context.text_extents(label)
         text_area_top = BAR_TOP + BAR_HEIGHT
