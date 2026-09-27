@@ -24,8 +24,10 @@ journalctl -k -f -n0 -o cat | while read -r line; do
 	case "$line" in
 	*mtk_drm_crtc_atomic_resume*)
 		lagos-wmt wifi-suspend-mode 0 &
-		# panel prepare takes ~220ms after this line
-		sleep 0.5
+		;;
+	*"tianma_prepare -"*)
+		# the panel has finished its power-up sequence
+		sleep 0.05
 		resend_brightness
 		;;
 	*"tianma_unprepare +"*)

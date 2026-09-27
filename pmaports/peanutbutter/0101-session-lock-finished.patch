@@ -1,0 +1,65 @@
+From b180b371bf5f240acca41385980beced9a9fbb32 Mon Sep 17 00:00:00 2001
+From: nikuzo <buelaniki@gmail.com>
+Date: Sat, 26 Sep 2026 21:10:30 -0300
+Subject: [PATCH] Exit cleanly when the compositor finishes the session lock
+
+ext_session_lock_v1.finished (sent when another locker already holds the
+session, or the lock ends) hit unreachable!() and aborted, e.g. when sxmo
+started a second peanutbutter while one was already running. Stop the
+main loop and destroy the lock object instead; a finished lock may not be
+unlocked.
+---
+ src/wayland_protocol.rs | 16 ++++++++++++++++
+ 1 file changed, 16 insertions(+)
+
+diff --git a/src/wayland_protocol.rs b/src/wayland_protocol.rs
+index 8bdbec9..4835647 100644
+--- a/src/wayland_protocol.rs
++++ b/src/wayland_protocol.rs
+@@ -64,6 +64,7 @@ pub struct State {
+     pub inverted: bool,
+     pub configured: bool,
+     running: bool,
++    lock_finished: bool, // the compositor sent `finished` for our lock
+     pub redraw: bool,
+     pub debug: bool, // In debug mode, a simple ESC suffices to unlock (useful for testing without touch support)
+     notouch: bool,   // disable touch support  (for devices that don't have it)
+@@ -103,6 +104,13 @@ impl State {
+     }
+ 
+     pub fn unlock(&mut self) {
++        if self.lock_finished {
++            // a finished lock may only be destroyed, not unlocked
++            self.lock.as_ref().unwrap().destroy();
++            self.lock = None;
++            self.round();
++            return;
++        }
+         self.lock.as_ref().unwrap().unlock_and_destroy();
+         self.lock = None;
+         self.connection.roundtrip().expect("Failed to unlock");
+@@ -287,6 +295,13 @@ impl Dispatch<ext_session_lock_v1::ExtSessionLockV1, ()> for State {
+                 surface.attach(state.buffers.iter().last(), 0, 0);
+                 state.base_surface = Some(surface);
+             }
++            ext_session_lock_v1::Event::Finished => {
++                // The compositor won't let us lock (another locker holds the
++                // session) or ended the lock: nothing left to do
++                eprintln!("[peanutbutter] session lock finished by the compositor");
++                state.lock_finished = true;
++                state.running = false;
++            }
+             _ => unreachable!(),
+         }
+     }
+@@ -356,6 +371,7 @@ pub fn init_wayland(
+         notouch,
+         nofeedback,
+         running: true,
++        lock_finished: false,
+         zxdg_manager: None,
+         wl_shm: None,
+         touch_state: None,
+-- 
+2.55.0
+

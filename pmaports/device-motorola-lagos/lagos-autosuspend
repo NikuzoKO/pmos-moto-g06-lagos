@@ -29,10 +29,15 @@ while true; do
 	cat /sys/power/wakeup_count > /dev/null
 	wait_can_suspend
 
+	# MediaTek's clkchk vetoes the first attempt while PLLs are still on and
+	# lets the retry through, so retry quickly
 	if ! sxmo_suspend.sh; then
-		sleep 1
+		sleep 0.2
 		continue
 	fi
 
-	sleep 10
+	# sxmo waits 10s after a wakeup; this phone wakes for every unicast
+	# packet on WiFi, and sxmo's own wakelocks keep it up while a call or
+	# message is being handled
+	sleep 3
 done
