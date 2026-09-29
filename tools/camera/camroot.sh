@@ -30,6 +30,14 @@ down() {
 map_part system_a $SYS 2728 3603432 ext4 noload
 map_part vendor_a $VEN 9211904 1014272 erofs
 
+# kernel side, in stock vendor_dlkm modules.load order; ged = gralloc's /proc/ged
+modprobe -a imgsensor_isp4_t gz_trusty_mod gz_ipc_mod gz_irq_mod gz_virtio_mod \
+	gz_tz_system gz_main_mod gz_log_mod trusted_mem mtk_heap_debug mtk_sec_heap iommu_gz \
+	cmdq-sec-drv mdp_drv_mt6768 camera_eeprom_isp4_t archcounter_timesync camera_mem \
+	cam_qos_4 ccu_isp4 camera_isp_4_t camera_fdvt_isp40 camera_dpe_isp40 mtk_jpeg \
+	mainaf flashlight flashlights-aw36515 mtk-smi-bwc ged
+[ -e /lib/firmware/lib3a.ccu ] || cp $VEN/firmware/lib3a.ccu /lib/firmware/
+
 mkdir -p $BASE/upper $BASE/work $BASE/vupper $BASE/vwork $M
 mountpoint -q $M || mount -t overlay overlay \
 	-o lowerdir=$SYS,upperdir=$BASE/upper,workdir=$BASE/work $M
@@ -45,6 +53,8 @@ mount -t tmpfs -o mode=755 dev $M/dev
 (cd /dev && find . -xdev \( -type c -o -type b -o -type d -o -type l \) \
 	! -path './pts*' ! -path './shm*' | cpio -pdm $M/dev 2>/dev/null)
 mkdir -p $M/dev/binderfs $M/dev/socket $M/dev/pts
+# mtk-smi-bwc registers a char major but creates no device, so udev makes no node
+mknod -m 666 $M/dev/MTK_SMI c $(awk '$2 == "MTK_SMI" {print $1}' /proc/devices) 0
 mount -t binder binder $M/dev/binderfs
 for dev in binder hwbinder vndbinder; do ln -sf binderfs/$dev $M/dev/$dev; done
 chmod 666 $M/dev/binderfs/*binder
