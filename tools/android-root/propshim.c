@@ -18,12 +18,15 @@ char *strchr(const char *string, int character);
 
 #define PROP_NAME_MAX 256
 #define PROP_VALUE_MAX 92
-#define MAX_PROPERTIES 512
+#define MAX_PROPERTIES 4096
 #define PROPERTY_FILE "/vendor/etc/lagos.prop"
 
+/* Same layout as bionic's prop_info: callers may hand our pointers to
+ * libc's __system_property_serial(), which spins while bit 0 is set. */
 struct property {
-	char name[PROP_NAME_MAX];
+	volatile uint32_t serial; /* value length << 24 | change counter << 1 */
 	char value[PROP_VALUE_MAX];
+	char name[PROP_NAME_MAX];
 };
 
 static struct property properties[MAX_PROPERTIES];
@@ -55,6 +58,8 @@ static struct property *store(const char *name, const char *value)
 		copy_string(property->name, name, PROP_NAME_MAX);
 	}
 	copy_string(property->value, value, PROP_VALUE_MAX);
+	property->serial = (uint32_t)strlen(property->value) << 24 |
+		((property->serial + 2) & 0xfffffe);
 	return property;
 }
 
@@ -106,6 +111,16 @@ int __system_property_read(const void *info, char *name, char *value)
 	return (int)strlen(value);
 }
 
+uint32_t __system_property_serial(const void *info)
+{
+	return ((const struct property *)info)->serial;
+}
+
+uint32_t __system_property_area_serial(void)
+{
+	return 0;
+}
+
 int __system_property_set(const char *name, const char *value)
 {
 	dprintf(2, "[propshim] set %s=%s\n", name, value);
@@ -125,4 +140,13 @@ int property_get(const char *name, char *value, const char *default_value)
 int property_set(const char *name, const char *value)
 {
 	return __system_property_set(name, value);
+}
+
+/* No SELinux policy is loaded on the host, so libselinux cannot map peer
+ * contexts to SIDs and servicemanager would reject every addService(). */
+int selinux_check_access(const char *source, const char *target, const char *class,
+	const char *permission, void *audit_data)
+{
+	(void)source, (void)target, (void)class, (void)permission, (void)audit_data;
+	return 0;
 }
