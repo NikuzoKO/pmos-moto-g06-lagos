@@ -1,0 +1,40 @@
+#!/bin/sh
+# lagos-gles-guard [switch]
+# Watches the sway session after it starts on the GLES2 renderer (panfrost via
+# mesa kmsro). If no sway survives 30 s within 4 min, it drops /run/lagos-gpu.env
+# and restarts tinydm on pixman. "switch" first moves a running session to GLES2.
+# tinydm has After=session-cN.scope and an old scope can linger ~90 s after sway
+# exits (TimeoutStopSec), so the scope is killed explicitly on every restart.
+log=/run/lagos-gles-guard.log
+say() { echo "$(date +%T) $*" >> $log; }
+
+restart_session() {
+	systemctl stop tinydm
+	for s in $(systemctl list-units --plain --no-legend 'session-c*.scope' | cut -d' ' -f1); do
+		systemctl kill -s KILL "$s"
+	done
+	sleep 1
+	systemctl start tinydm
+}
+
+if [ "$1" = switch ]; then
+	say "switch to gles2"
+	echo WLR_RENDERER=gles2 > /run/lagos-gpu.env
+	restart_session
+fi
+[ -e /run/lagos-gpu.env ] || { say "no gles2 env, nothing to guard"; exit 0; }
+
+t=0 last= since=0
+while [ $t -lt 240 ]; do
+	sleep 5; t=$((t + 5))
+	p=$(pidof sway)
+	if [ -z "$p" ] || [ "$p" != "$last" ]; then last=$p since=$t; continue; fi
+	if [ $((t - since)) -ge 30 ]; then
+		r=$(grep -m1 -oE '[a-z_]*_dri\.so|libgallium[^ ]*' /proc/$p/maps)
+		say "sway $p stable for 30 s at t=$t s, renderer lib: ${r:-none}"
+		exit 0
+	fi
+done
+say "no stable sway within 240 s (last pid '$last') -> fallback to pixman"
+rm -f /run/lagos-gpu.env
+restart_session

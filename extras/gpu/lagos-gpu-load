@@ -1,0 +1,23 @@
+#!/bin/sh
+# Load the out-of-tree gpu-sched + panfrost (Mali-G52) before the session starts.
+# Crash guard: the marker is removed 3 min after a successful load; if it is
+# still there at boot, the previous boot died with panfrost loaded, so the GPU
+# is disabled instead of risking a boot loop. Retry: rm /var/lib/lagos/gpu-disabled
+set -e
+dir=/usr/local/lib/lagos/gpu
+state=/var/lib/lagos
+mkdir -p "$state"
+if [ -e "$state/gpu-loading" ]; then
+	mv "$state/gpu-loading" "$state/gpu-disabled"
+	sync
+	echo "lagos-gpu: previous boot died after loading panfrost; disabled ($state/gpu-disabled)" >&2
+	exit 0
+fi
+touch "$state/gpu-loading"
+sync
+modprobe mtk_gpufreq_wrapper_legacy
+insmod "$dir/gpu-sched.ko"
+insmod "$dir/panfrost.ko"
+# tinydm reads this (EnvironmentFile overrides the pixman default of lagos-novt.conf)
+echo WLR_RENDERER=gles2 > /run/lagos-gpu.env
+systemd-run --no-block --on-active=180 --unit=lagos-gpu-ok /bin/rm -f "$state/gpu-loading"

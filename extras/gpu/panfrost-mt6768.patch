@@ -1,0 +1,438 @@
+diff --git a/panfrost/Makefile b/panfrost/Makefile
+index 7da2b3f..0d4c36a 100644
+--- a/panfrost/Makefile
++++ b/panfrost/Makefile
+@@ -10,6 +10,9 @@ panfrost-y := \
+ 	panfrost_job.o \
+ 	panfrost_mmu.o \
+ 	panfrost_perfcnt.o \
+-	panfrost_dump.o
++	panfrost_dump.o \
++	lagos_compat.o
++
++ccflags-y += -include $(src)/lagos_compat.h
+ 
+ obj-$(CONFIG_DRM_PANFROST) += panfrost.o
+diff --git a/panfrost/panfrost_devfreq.c b/panfrost/panfrost_devfreq.c
+index e78de99..e2cb3d4 100644
+--- a/panfrost/panfrost_devfreq.c
++++ b/panfrost/panfrost_devfreq.c
+@@ -53,7 +53,10 @@ static int panfrost_devfreq_get_dev_status(struct device *dev,
+ 	struct panfrost_devfreq *pfdevfreq = &pfdev->pfdevfreq;
+ 	unsigned long irqflags;
+ 
+-	status->current_frequency = clk_get_rate(pfdev->clock);
++	if (pfdev->comp->mtk_gpufreq)
++		status->current_frequency = gpufreq_get_cur_freq(0) * 1000UL;
++	else
++		status->current_frequency = clk_get_rate(pfdev->clock);
+ 
+ 	spin_lock_irqsave(&pfdevfreq->lock, irqflags);
+ 
+@@ -83,6 +86,100 @@ static struct devfreq_dev_profile panfrost_devfreq_profile = {
+ 	.get_dev_status = panfrost_devfreq_get_dev_status,
+ };
+ 
++/*
++ * lagos: the MediaTek legacy gpufreq driver owns clock, buck and vsram, so
++ * mirror its working OPP table as dynamic OPPs and switch with gpufreq_commit().
++ */
++static int panfrost_devfreq_mtk_idx(unsigned long freq)
++{
++	int i, n = gpufreq_get_opp_num(0);
++
++	for (i = 0; i < n; i++)
++		if (gpufreq_get_freq_by_idx(0, i) * 1000UL == freq)
++			return i;
++	return -EINVAL;
++}
++
++static int panfrost_devfreq_mtk_target(struct device *dev, unsigned long *freq,
++				       u32 flags)
++{
++	struct dev_pm_opp *opp;
++	int idx, ret;
++
++	opp = devfreq_recommended_opp(dev, freq, flags);
++	if (IS_ERR(opp))
++		return PTR_ERR(opp);
++	dev_pm_opp_put(opp);
++
++	idx = panfrost_devfreq_mtk_idx(*freq);
++	if (idx < 0)
++		return idx;
++
++	ret = gpufreq_commit(0, idx);
++	return ret < 0 ? ret : 0;
++}
++
++static struct devfreq_dev_profile panfrost_devfreq_mtk_profile = {
++	.timer = DEVFREQ_TIMER_DELAYED,
++	.polling_ms = 50,
++	.target = panfrost_devfreq_mtk_target,
++	.get_dev_status = panfrost_devfreq_get_dev_status,
++};
++
++static void panfrost_devfreq_mtk_remove_opps(void *dev)
++{
++	dev_pm_opp_remove_all_dynamic(dev);
++}
++
++static int panfrost_devfreq_init_mtk(struct panfrost_device *pfdev)
++{
++	struct panfrost_devfreq *pfdevfreq = &pfdev->pfdevfreq;
++	struct device *dev = &pfdev->pdev->dev;
++	struct devfreq *devfreq;
++	int i, n, ret;
++
++	n = gpufreq_get_opp_num(0);
++	if (n <= 0)
++		return 0;
++
++	ret = devm_add_action(dev, panfrost_devfreq_mtk_remove_opps, dev);
++	if (ret)
++		return ret;
++
++	for (i = 0; i < n; i++) {
++		struct dev_pm_opp_data data = {
++			.freq = gpufreq_get_freq_by_idx(0, i) * 1000UL,
++		};
++
++		ret = dev_pm_opp_add_dynamic(dev, &data);
++		if (ret) {
++			DRM_DEV_ERROR(dev, "Couldn't add OPP %lu (%d)\n", data.freq, ret);
++			return ret;
++		}
++	}
++
++	spin_lock_init(&pfdevfreq->lock);
++	panfrost_devfreq_reset(pfdevfreq);
++
++	panfrost_devfreq_mtk_profile.initial_freq = gpufreq_get_cur_freq(0) * 1000UL;
++	pfdevfreq->gov_data.upthreshold = 45;
++	pfdevfreq->gov_data.downdifferential = 5;
++
++	devfreq = devm_devfreq_add_device(dev, &panfrost_devfreq_mtk_profile,
++					  DEVFREQ_GOV_SIMPLE_ONDEMAND,
++					  &pfdevfreq->gov_data);
++	if (IS_ERR(devfreq)) {
++		DRM_DEV_ERROR(dev, "Couldn't initialize GPU devfreq\n");
++		return PTR_ERR(devfreq);
++	}
++	pfdevfreq->devfreq = devfreq;
++
++	DRM_DEV_INFO(dev, "devfreq: %d MTK OPPs, %lu-%lu MHz\n", n,
++		     gpufreq_get_freq_by_idx(0, n - 1) / 1000UL,
++		     gpufreq_get_freq_by_idx(0, 0) / 1000UL);
++	return 0;
++}
++
+ static int panfrost_read_speedbin(struct device *dev)
+ {
+ 	u32 val;
+@@ -118,6 +215,9 @@ int panfrost_devfreq_init(struct panfrost_device *pfdev)
+ 	struct thermal_cooling_device *cooling;
+ 	struct panfrost_devfreq *pfdevfreq = &pfdev->pfdevfreq;
+ 
++	if (pfdev->comp->mtk_gpufreq)
++		return panfrost_devfreq_init_mtk(pfdev);
++
+ 	if (pfdev->comp->num_supplies > 1) {
+ 		/*
+ 		 * GPUs with more than 1 supply require platform-specific handling:
+diff --git a/panfrost/panfrost_device.c b/panfrost/panfrost_device.c
+index fa1a086..22b0be8 100644
+--- a/panfrost/panfrost_device.c
++++ b/panfrost/panfrost_device.c
+@@ -3,6 +3,8 @@
+ /* Copyright 2019 Linaro, Ltd, Rob Herring <robh@kernel.org> */
+ 
+ #include <linux/clk.h>
++#include <linux/ctype.h>
++#include <linux/delay.h>
+ #include <linux/reset.h>
+ #include <linux/platform_device.h>
+ #include <linux/pm_domain.h>
+@@ -34,11 +36,60 @@ static void panfrost_reset_fini(struct panfrost_device *pfdev)
+ 	reset_control_assert(pfdev->rstc);
+ }
+ 
++/* lagos bring-up: breadcrumbs that survive a hard hang (logger fsyncs) */
++static int stop_stage = 99;
++module_param(stop_stage, int, 0644);
++MODULE_PARM_DESC(stop_stage, "abort probe with -ENODEV after this stage (bring-up bisect)");
++#define PF_BC(pfdev, n, what) ({ \
++	dev_dbg((pfdev)->dev, "BC%d %s\n", n, what); \
++	(n) >= stop_stage; })
++
++static int panfrost_mtk_power(struct panfrost_device *pfdev, bool on)
++{
++	int ret;
++
++	if (!pfdev->comp->mtk_gpufreq)
++		return 0;
++	dev_dbg(pfdev->dev, "mtk power %d: bringup=%u ctrl_enable=%u\n",
++		 on, gpufreq_bringup(), gpufreq_power_ctrl_enable());
++	if (gpufreq_bringup() || !gpufreq_power_ctrl_enable())
++		return 0;
++
++	ret = gpufreq_power_control(on ? 1 : 0);
++	if (ret < 0) {
++		dev_err(pfdev->dev, "gpufreq power %s failed %d\n",
++			on ? "on" : "off", ret);
++		return ret;
++	}
++	return 0;
++}
++
++/* Mesa/mainline name the interrupts "job", "mmu", "gpu"; MediaTek's DT uses uppercase */
++int panfrost_get_irq(struct panfrost_device *pfdev, const char *name)
++{
++	struct platform_device *pdev = to_platform_device(pfdev->dev);
++	char upper[8];
++	int irq, i;
++
++	irq = platform_get_irq_byname_optional(pdev, name);
++	if (irq > 0)
++		return irq;
++
++	for (i = 0; name[i] && i < sizeof(upper) - 1; i++)
++		upper[i] = toupper(name[i]);
++	upper[i] = 0;
++
++	return platform_get_irq_byname(pdev, upper);
++}
++
+ static int panfrost_clk_init(struct panfrost_device *pfdev)
+ {
+ 	int err;
+ 	unsigned long rate;
+ 
++	if (pfdev->comp->mtk_gpufreq)
++		return panfrost_mtk_power(pfdev, true);
++
+ 	pfdev->clock = devm_clk_get(pfdev->dev, NULL);
+ 	if (IS_ERR(pfdev->clock)) {
+ 		dev_err(pfdev->dev, "get clock failed %ld\n", PTR_ERR(pfdev->clock));
+@@ -79,6 +130,10 @@ disable_clock:
+ 
+ static void panfrost_clk_fini(struct panfrost_device *pfdev)
+ {
++	if (pfdev->comp->mtk_gpufreq) {
++		panfrost_mtk_power(pfdev, false);
++		return;
++	}
+ 	clk_disable_unprepare(pfdev->bus_clock);
+ 	clk_disable_unprepare(pfdev->clock);
+ }
+@@ -212,6 +267,7 @@ int panfrost_device_init(struct panfrost_device *pfdev)
+ 		dev_err(pfdev->dev, "clk init failed %d\n", err);
+ 		return err;
+ 	}
++	if (PF_BC(pfdev, 1, "powered (no MMIO yet)")) { err = -ENODEV; goto out_clk; }
+ 
+ 	err = panfrost_devfreq_init(pfdev);
+ 	if (err) {
+@@ -242,18 +298,22 @@ int panfrost_device_init(struct panfrost_device *pfdev)
+ 		err = PTR_ERR(pfdev->iomem);
+ 		goto out_pm_domain;
+ 	}
++	if (PF_BC(pfdev, 2, "ioremapped, next: gpu_init (first MMIO)")) { err = -ENODEV; goto out_pm_domain; }
+ 
+ 	err = panfrost_gpu_init(pfdev);
+ 	if (err)
+ 		goto out_pm_domain;
++	if (PF_BC(pfdev, 3, "gpu_init done")) { err = -ENODEV; goto out_gpu; }
+ 
+ 	err = panfrost_mmu_init(pfdev);
+ 	if (err)
+ 		goto out_gpu;
++	if (PF_BC(pfdev, 4, "mmu_init done")) { err = -ENODEV; goto out_mmu; }
+ 
+ 	err = panfrost_job_init(pfdev);
+ 	if (err)
+ 		goto out_mmu;
++	if (PF_BC(pfdev, 5, "job_init done")) { err = -ENODEV; goto out_job; }
+ 
+ 	err = panfrost_perfcnt_init(pfdev);
+ 	if (err)
+@@ -404,6 +464,12 @@ void panfrost_device_reset(struct panfrost_device *pfdev)
+ static int panfrost_device_resume(struct device *dev)
+ {
+ 	struct panfrost_device *pfdev = dev_get_drvdata(dev);
++	int ret;
++
++	dev_dbg(dev, "BC-R resume\n");
++	ret = panfrost_mtk_power(pfdev, true);
++	if (ret)
++		return ret;
+ 
+ 	panfrost_device_reset(pfdev);
+ 	panfrost_devfreq_resume(pfdev);
+@@ -418,8 +484,12 @@ static int panfrost_device_suspend(struct device *dev)
+ 	if (!panfrost_job_is_idle(pfdev))
+ 		return -EBUSY;
+ 
++	dev_dbg(dev, "BC-S suspend\n");
+ 	panfrost_devfreq_suspend(pfdev);
+ 	panfrost_gpu_power_off(pfdev);
++	dev_dbg(dev, "BC-S cores off\n");
++	panfrost_mtk_power(pfdev, false);
++	dev_dbg(dev, "BC-S gpufreq off\n");
+ 
+ 	return 0;
+ }
+diff --git a/panfrost/panfrost_device.h b/panfrost/panfrost_device.h
+index b0126b9..4e3bf2e 100644
+--- a/panfrost/panfrost_device.h
++++ b/panfrost/panfrost_device.h
+@@ -75,8 +75,23 @@ struct panfrost_compatible {
+ 
+ 	/* Vendor implementation quirks callback */
+ 	void (*vendor_quirk)(struct panfrost_device *pfdev);
++
++	/* lagos: power through the MediaTek legacy gpufreq driver */
++	bool mtk_gpufreq;
+ };
+ 
++int panfrost_get_irq(struct panfrost_device *pfdev, const char *name);
++
++/* lagos: exported by mtk_gpufreq_wrapper_legacy.ko (stock vendor_dlkm).
++ * target 0 = default; frequencies in kHz; OPP index 0 = fastest */
++extern int gpufreq_power_control(int power);
++extern unsigned int gpufreq_bringup(void);
++extern unsigned int gpufreq_power_ctrl_enable(void);
++extern int gpufreq_get_opp_num(int target);
++extern unsigned int gpufreq_get_freq_by_idx(int target, int oppidx);
++extern unsigned int gpufreq_get_cur_freq(int target);
++extern int gpufreq_commit(int target, int oppidx);
++
+ struct panfrost_device {
+ 	struct device *dev;
+ 	struct drm_device *ddev;
+diff --git a/panfrost/panfrost_drv.c b/panfrost/panfrost_drv.c
+index ddcc825..3387b73 100644
+--- a/panfrost/panfrost_drv.c
++++ b/panfrost/panfrost_drv.c
+@@ -587,6 +587,7 @@ static int panfrost_probe(struct platform_device *pdev)
+ 		goto err_out0;
+ 	}
+ 
++	dev_dbg(&pdev->dev, "BC6 device_init done, enabling runtime PM\n");
+ 	pm_runtime_set_active(pfdev->dev);
+ 	pm_runtime_mark_last_busy(pfdev->dev);
+ 	pm_runtime_enable(pfdev->dev);
+@@ -626,6 +627,8 @@ static void panfrost_remove(struct platform_device *pdev)
+ 	pm_runtime_disable(pfdev->dev);
+ 	panfrost_device_fini(pfdev);
+ 	pm_runtime_set_suspended(pfdev->dev);
++	/* lagos: drop the get_sync above; the usage count outlives the module */
++	pm_runtime_put_noidle(pfdev->dev);
+ 
+ 	drm_dev_put(ddev);
+ }
+@@ -692,7 +695,14 @@ static const struct panfrost_compatible mediatek_mt8192_data = {
+ 	.pm_domain_names = mediatek_mt8192_pm_domains,
+ };
+ 
++static const struct panfrost_compatible mediatek_legacy_data = {
++	.num_supplies = 0,
++	.num_pm_domains = 0,
++	.mtk_gpufreq = true,
++};
++
+ static const struct of_device_id dt_match[] = {
++	{ .compatible = "mediatek,mali", .data = &mediatek_legacy_data },
+ 	/* Set first to probe before the generic compatibles */
+ 	{ .compatible = "amlogic,meson-gxm-mali",
+ 	  .data = &amlogic_data, },
+diff --git a/panfrost/panfrost_gem_shrinker.c b/panfrost/panfrost_gem_shrinker.c
+index 6a71a25..5536168 100644
+--- a/panfrost/panfrost_gem_shrinker.c
++++ b/panfrost/panfrost_gem_shrinker.c
+@@ -100,6 +100,10 @@ panfrost_gem_shrinker_scan(struct shrinker *shrinker, struct shrink_control *sc)
+ void panfrost_gem_shrinker_init(struct drm_device *dev)
+ {
+ 	struct panfrost_device *pfdev = dev->dev_private;
++
++	/* lagos: drm_gem_shmem_purge() can't be implemented without unexported helpers */
++	return;
++
+ 	pfdev->shrinker.count_objects = panfrost_gem_shrinker_count;
+ 	pfdev->shrinker.scan_objects = panfrost_gem_shrinker_scan;
+ 	pfdev->shrinker.seeks = DEFAULT_SEEKS;
+diff --git a/panfrost/panfrost_gpu.c b/panfrost/panfrost_gpu.c
+index 164c469..5ddbb68 100644
+--- a/panfrost/panfrost_gpu.c
++++ b/panfrost/panfrost_gpu.c
+@@ -407,11 +407,16 @@ int panfrost_gpu_init(struct panfrost_device *pfdev)
+ {
+ 	int err, irq;
+ 
++	dev_dbg(pfdev->dev, "BC2.1 reading GPU_ID\n");
++	dev_dbg(pfdev->dev, "BC2.2 GPU_ID=0x%08x\n", gpu_read(pfdev, GPU_ID));
++
+ 	err = panfrost_gpu_soft_reset(pfdev);
+ 	if (err)
+ 		return err;
++	dev_dbg(pfdev->dev, "BC2.3 soft reset ok\n");
+ 
+ 	panfrost_gpu_init_features(pfdev);
++	dev_dbg(pfdev->dev, "BC2.4 features read\n");
+ 
+ 	err = dma_set_mask_and_coherent(pfdev->dev,
+ 		DMA_BIT_MASK(FIELD_GET(0xff00, pfdev->features.mmu_features)));
+@@ -420,7 +425,7 @@ int panfrost_gpu_init(struct panfrost_device *pfdev)
+ 
+ 	dma_set_max_seg_size(pfdev->dev, UINT_MAX);
+ 
+-	irq = platform_get_irq_byname(to_platform_device(pfdev->dev), "gpu");
++	irq = panfrost_get_irq(pfdev, "gpu");
+ 	if (irq <= 0)
+ 		return -ENODEV;
+ 
+@@ -431,6 +436,7 @@ int panfrost_gpu_init(struct panfrost_device *pfdev)
+ 		return err;
+ 	}
+ 
++	dev_dbg(pfdev->dev, "BC2.5 irq ok, powering cores\n");
+ 	panfrost_gpu_power_on(pfdev);
+ 
+ 	return 0;
+diff --git a/panfrost/panfrost_job.c b/panfrost/panfrost_job.c
+index a8b4827..bf4e218 100644
+--- a/panfrost/panfrost_job.c
++++ b/panfrost/panfrost_job.c
+@@ -809,7 +809,7 @@ int panfrost_job_init(struct panfrost_device *pfdev)
+ 	INIT_WORK(&pfdev->reset.work, panfrost_reset_work);
+ 	spin_lock_init(&js->job_lock);
+ 
+-	js->irq = platform_get_irq_byname(to_platform_device(pfdev->dev), "job");
++	js->irq = panfrost_get_irq(pfdev, "job");
+ 	if (js->irq <= 0)
+ 		return -ENODEV;
+ 
+diff --git a/panfrost/panfrost_mmu.c b/panfrost/panfrost_mmu.c
+index 83fa384..5bd49ed 100644
+--- a/panfrost/panfrost_mmu.c
++++ b/panfrost/panfrost_mmu.c
+@@ -759,7 +759,7 @@ int panfrost_mmu_init(struct panfrost_device *pfdev)
+ {
+ 	int err, irq;
+ 
+-	irq = platform_get_irq_byname(to_platform_device(pfdev->dev), "mmu");
++	irq = panfrost_get_irq(pfdev, "mmu");
+ 	if (irq <= 0)
+ 		return -ENODEV;
+ 
+@@ -774,6 +774,10 @@ int panfrost_mmu_init(struct panfrost_device *pfdev)
+ 		return err;
+ 	}
+ 
++	/* lagos: unmask MMU irqs now; upstream only does it on runtime resume,
++	 * so a GPU that stays active after probe never sees heap-growth faults */
++	panfrost_mmu_reset(pfdev);
++
+ 	return 0;
+ }
+ 

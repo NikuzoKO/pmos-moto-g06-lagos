@@ -1,0 +1,17 @@
+[Unit]
+Description=Load panfrost for the Mali-G52 (out-of-tree gpu-sched + panfrost)
+ConditionPathExists=/usr/local/lib/lagos/gpu/panfrost.ko
+ConditionPathExists=!/var/lib/lagos/gpu-disabled
+ConditionKernelCommandLine=!oem_devinfo.bootmode=8
+After=systemd-udevd.service systemd-modules-load.service
+# wlroots only picks the GLES2 renderer (Mesa kmsro: mediatek + panfrost)
+# if the render node exists when sway starts
+Before=tinydm.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/lagos-gpu-load
+
+[Install]
+WantedBy=multi-user.target
