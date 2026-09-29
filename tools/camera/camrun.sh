@@ -19,7 +19,7 @@ start() {
 	name=$1
 	shift
 	case $1 in /vendor/*) shim=/vendor/lib64/libpropshim.so ;; *) shim=/system/lib64/libpropshim.so ;; esac
-	env -i PATH=/system/bin:/vendor/bin LD_PRELOAD=$shim \
+	env -i PATH=/system/bin:/vendor/bin LD_PRELOAD=$shim${SHIM:+:$SHIM} \
 		ANDROID_ROOT=/system ANDROID_DATA=/data \
 		ANDROID_I18N_ROOT=/apex/com.android.i18n ANDROID_TZDATA_ROOT=/apex/com.android.tzdata \
 		${WRAP:-} $CHROOT $M "$@" > $LOG/$name.out 2>&1 &
@@ -32,7 +32,12 @@ python3 $HERE/fake-logd.py $M $LOG/logcat.txt &
 echo $! > $LOG/logd.pid
 sleep 1
 start servicemanager /system/bin/servicemanager
-start hwservicemanager /system/bin/hwservicemanager
 start vndservicemanager /vendor/bin/vndservicemanager /dev/vndbinder
+start camproxy /system/bin/camproxy media.camera.proxy=android.hardware.ICameraServiceProxy \
+	sensor_privacy=android.hardware.ISensorPrivacyManager processinfo=android.os.IProcessInfoService \
+	SurfaceFlingerAIDL=android.gui.ISurfaceComposer \
+	android.frameworks.sensorservice.ISensorManager/default=android.frameworks.sensorservice.ISensorManager
+start mtkpower /vendor/bin/hw/vendor.mediatek.hardware.mtkpower-service.mediatek
 start allocator /vendor/bin/hw/android.hardware.graphics.allocator-V2-service-mediatek
 DELAY=5 WRAP="${HALWRAP:-}" start camerahalserver /vendor/bin/hw/camerahalserver
+DELAY=3 SHIM=/system/lib64/libcamshim.so start cameraserver /system/bin/cameraserver

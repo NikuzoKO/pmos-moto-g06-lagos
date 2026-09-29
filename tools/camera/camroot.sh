@@ -70,6 +70,27 @@ for dir in linkerconfig tmp data/misc data/local/tmp mnt/vendor/cct \
 	data/vendor/dipdebug data/vendor/flicker data/vendor/aee_exp data/vendor/tombstones; do
 	mkdir -p $M/$dir
 done
+# property shim (tools/android-root/propshim.c) against bionic, into both partitions
+HERE=$(dirname "$(readlink -f "$0")")
+gcc -O2 -fPIC -shared -nostdlib -nostartfiles -fno-stack-protector \
+	-Wl,--hash-style=both -Wl,-z,noexecstack -Wl,-soname,libpropshim.so \
+	-o $BASE/libpropshim.so $HERE/../android-root/propshim.c \
+	$M/apex/com.android.runtime/lib64/bionic/libc.so
+install -m644 $BASE/libpropshim.so $M/system/lib64/libpropshim.so
+install -m644 $BASE/libpropshim.so $M/vendor/lib64/libpropshim.so
+# props are per process: anything another daemon would set must be here
+{
+	echo servicemanager.ready=true
+	# no HIDL on this device: libhidl clients check this instead of asking hwservicemanager
+	echo hwservicemanager.disabled=true
+	echo ro.hardware=mt6768
+	echo ro.boot.hardware=mt6768
+	echo ro.boot.hardware.platform=mt6768
+	echo ro.debuggable=0
+	cat $HERE/../android-root/lagos.prop
+	cat $M/system/build.prop $M/vendor/odm/etc/build.prop $M/vendor/build.prop
+} | grep -E '^[a-z].*=' > $M/vendor/etc/lagos.prop
+
 mount -t tmpfs -o mode=755 linkerconfig $M/linkerconfig
 mount -t tmpfs -o mode=1777 tmp $M/tmp
 # properties matter: without them linkerconfig emits the flat legacy config
