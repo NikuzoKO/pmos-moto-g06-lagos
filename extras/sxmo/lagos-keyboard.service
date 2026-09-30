@@ -1,0 +1,6 @@
+[Unit]
+Description=Start wvkbd hidden in --auto mode (shows itself on text focus)
+
+[Service]
+Type=oneshot
+ExecStart=sxmo_keyboard.sh close
