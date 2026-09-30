@@ -1,0 +1,288 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: MIT
+# Status bar for sxmo on sway, in place of swaybar: two islands flanking the
+# front camera's punch-hole. Left island: the sxmo status icons (modem,
+# network, wifi, notifications, lock state). Right island: a horizontal
+# battery pill with the percentage inside, then the clock. Volume and mic are
+# left out.
+#
+# Content comes from sxmo's own status store ($XDG_RUNTIME_DIR/sxmobar, the
+# INI file sxmo_hook_statusbar.sh fills through `sxmobar -a`), watched with
+# inotify, so no polling: sxmo's hooks already update it on modem/network/
+# battery events and once a minute for the clock. The battery level and
+# charging state are read from sysfs whenever the store changes.
+# Started from ~/.config/services/lagos-statusbar.service (superd).
+
+import configparser
+import math
+import os
+
+import cairo
+import gi
+
+gi.require_version("Gtk", "3.0")
+gi.require_version("Gdk", "3.0")
+gi.require_version("GtkLayerShell", "0.1")
+gi.require_version("PangoCairo", "1.0")
+from gi.repository import Gio, GLib, Gtk, GtkLayerShell, Pango, PangoCairo  # noqa: E402
+
+# Logical pixels (sway scales them)
+BAR_HEIGHT = 26  # reserved at the top; the islands sit inside it
+ISLAND_HEIGHT = 22
+ISLAND_PADDING = 10
+ISLAND_SPACING = 7  # between items inside an island
+# Punch-hole: horizontal centre as a fraction of the width, and the gap left
+# free around it (the islands end/start at its edges)
+CAMERA_CENTER = 0.5
+CAMERA_GAP = 34
+ICON_FONT = "DejaVuSansM Nerd Font Propo 11"
+TEXT_FONT = "Roboto Mono Bold 11"
+PILL_FONT = "Roboto Mono Bold 8"
+PILL_WIDTH = 32
+PILL_HEIGHT = 15
+LOW_BATTERY = 15
+
+# Rosé Pine, matching the desktop
+ISLAND_COLOR = (0.098, 0.090, 0.141, 1.0)  # base
+TEXT_COLOR = (0.878, 0.871, 0.957, 1.0)  # text
+PILL_TRACK = (0.251, 0.239, 0.322, 1.0)  # highlight med
+PILL_FILL = (0.878, 0.871, 0.957, 1.0)  # text
+PILL_CHARGING = (0.612, 0.812, 0.847, 1.0)  # foam
+PILL_LOW = (0.922, 0.435, 0.573, 1.0)  # love
+PILL_TEXT_ON_FILL = (0.098, 0.090, 0.141, 1.0)  # base
+NAMED_COLORS = {
+    "red": (0.922, 0.435, 0.573, 1.0),  # love
+    "orange": (0.965, 0.757, 0.467, 1.0),  # gold
+    "yellow": (0.965, 0.757, 0.467, 1.0),  # gold
+    "green": (0.612, 0.812, 0.847, 1.0),  # foam
+    "blue": (0.769, 0.655, 0.906, 1.0),  # iris
+}
+
+STORE = os.path.join(os.environ.get("XDG_RUNTIME_DIR", "/run/user/%d" % os.getuid()), "sxmobar")
+LEFT_EXCLUDE = ("time", "volume", "mic", "battery")  # prefixes; the right island draws its own
+
+
+def rounded_rectangle(context, x, y, width, height, radius):
+    radius = min(radius, width / 2, height / 2)
+    context.new_sub_path()
+    context.arc(x + width - radius, y + radius, radius, -math.pi / 2, 0)
+    context.arc(x + width - radius, y + height - radius, radius, 0, math.pi / 2)
+    context.arc(x + radius, y + height - radius, radius, math.pi / 2, math.pi)
+    context.arc(x + radius, y + radius, radius, math.pi, 3 * math.pi / 2)
+    context.close_path()
+
+
+def color_of(name):
+    if not name or name == "default":
+        return TEXT_COLOR
+    if name in NAMED_COLORS:
+        return NAMED_COLORS[name]
+    if name.startswith("#") and len(name) == 7:
+        return tuple(int(name[i:i + 2], 16) / 255 for i in (1, 3, 5)) + (1.0,)
+    return TEXT_COLOR
+
+
+def read_store():
+    parser = configparser.ConfigParser(interpolation=None, strict=False)
+    try:
+        with open(STORE, encoding="utf-8") as handle:
+            parser.read_file(handle)
+    except (OSError, configparser.Error):
+        return []
+    items = []
+    for name in parser.sections():
+        section = parser[name]
+        try:
+            priority = int(section.get("priority", "50"))
+        except ValueError:
+            priority = 50
+        items.append({
+            "name": name,
+            "priority": priority,
+            "content": section.get("content", "").strip(),
+            "color": section.get("fg_color", "default"),
+            "bold": section.get("weight", "normal") == "bold",
+        })
+    items.sort(key=lambda item: item["priority"])
+    return items
+
+
+def find_battery():
+    base = "/sys/class/power_supply"
+    try:
+        names = sorted(os.listdir(base))
+    except OSError:
+        return None
+    for name in names:
+        try:
+            with open(os.path.join(base, name, "type")) as handle:
+                if handle.read().strip() == "Battery":
+                    return os.path.join(base, name)
+        except OSError:
+            continue
+    return None
+
+
+def read_battery(path):
+    if not path:
+        return None, False
+    try:
+        with open(os.path.join(path, "capacity")) as handle:
+            level = max(0, min(100, int(handle.read().strip())))
+        with open(os.path.join(path, "status")) as handle:
+            charging = handle.read().strip() in ("Charging", "Full")
+    except (OSError, ValueError):
+        return None, False
+    return level, charging
+
+
+class StatusBar(Gtk.Window):
+    def __init__(self):
+        super().__init__()
+        GtkLayerShell.init_for_window(self)
+        GtkLayerShell.set_layer(self, GtkLayerShell.Layer.TOP)
+        for edge in (GtkLayerShell.Edge.TOP, GtkLayerShell.Edge.LEFT, GtkLayerShell.Edge.RIGHT):
+            GtkLayerShell.set_anchor(self, edge, True)
+        GtkLayerShell.auto_exclusive_zone_enable(self)
+        GtkLayerShell.set_keyboard_mode(self, GtkLayerShell.KeyboardMode.NONE)
+        GtkLayerShell.set_namespace(self, "lagos-statusbar")
+        self.set_size_request(-1, BAR_HEIGHT)
+        self.set_app_paintable(True)
+        visual = self.get_screen().get_rgba_visual()
+        if visual:
+            self.set_visual(visual)
+        self.connect("draw", self.on_draw)
+        # touches go through to lisgd's top-edge swipe like before (it reads evdev anyway)
+        self.connect("realize", lambda *_: self.input_shape_combine_region(cairo.Region()))
+
+        self.battery_path = find_battery()
+        self.items = []
+        self.level, self.charging = None, False
+        self.reload()
+
+        # sxmobar rewrites the file (and may replace it), so watch the directory entry
+        self.monitor = Gio.File.new_for_path(STORE).monitor_file(Gio.FileMonitorFlags.WATCH_MOVES, None)
+        self.monitor.set_rate_limit(100)
+        self.monitor.connect("changed", self.on_store_changed)
+
+    def on_store_changed(self, monitor, file, other, event):
+        if event in (Gio.FileMonitorEvent.CHANGES_DONE_HINT, Gio.FileMonitorEvent.CREATED,
+                     Gio.FileMonitorEvent.RENAMED, Gio.FileMonitorEvent.MOVED_IN,
+                     Gio.FileMonitorEvent.CHANGED):
+            self.reload()
+
+    def reload(self):
+        items = read_store()
+        battery = read_battery(self.battery_path)
+        if items != self.items or battery != (self.level, self.charging):
+            self.items = items
+            self.level, self.charging = battery
+            self.queue_draw()
+
+    # --- drawing ------------------------------------------------------------
+
+    def layout(self, context, text, font):
+        layout = PangoCairo.create_layout(context)
+        layout.set_font_description(Pango.FontDescription.from_string(font))
+        layout.set_text(text, -1)
+        return layout
+
+    def on_draw(self, widget, context):
+        context.set_operator(cairo.OPERATOR_SOURCE)
+        context.set_source_rgba(0, 0, 0, 0)
+        context.paint()
+        context.set_operator(cairo.OPERATOR_OVER)
+
+        width = self.get_allocated_width()
+        camera_left = width * CAMERA_CENTER - CAMERA_GAP / 2
+        camera_right = width * CAMERA_CENTER + CAMERA_GAP / 2
+        top = (BAR_HEIGHT - ISLAND_HEIGHT) / 2
+
+        # left island: sxmo icons, right-aligned against the camera
+        icons = []
+        for item in self.items:
+            if item["name"].startswith(LEFT_EXCLUDE) or not item["content"]:
+                continue
+            icons.append((self.layout(context, item["content"], ICON_FONT), color_of(item["color"])))
+        if icons:
+            sizes = [layout.get_pixel_size() for layout, _ in icons]
+            inner = sum(w for w, _ in sizes) + ISLAND_SPACING * (len(icons) - 1)
+            island_width = inner + 2 * ISLAND_PADDING
+            x = max(0, camera_left - island_width)
+            self.island(context, x, top, island_width)
+            x += ISLAND_PADDING
+            for (layout, color), (w, h) in zip(icons, sizes):
+                context.set_source_rgba(*color)
+                context.move_to(x, top + (ISLAND_HEIGHT - h) / 2)
+                PangoCairo.show_layout(context, layout)
+                x += w + ISLAND_SPACING
+
+        # right island: battery pill, then the clock
+        clock = next((item["content"] for item in self.items if item["name"] == "time"), "")
+        clock_layout = self.layout(context, clock, TEXT_FONT) if clock else None
+        clock_w, clock_h = clock_layout.get_pixel_size() if clock_layout else (0, 0)
+        parts = []
+        if self.level is not None:
+            parts.append(PILL_WIDTH)
+        if clock_layout:
+            parts.append(clock_w)
+        if parts:
+            island_width = sum(parts) + ISLAND_SPACING * (len(parts) - 1) + 2 * ISLAND_PADDING
+            x = min(camera_right, width - island_width)
+            self.island(context, x, top, island_width)
+            x += ISLAND_PADDING
+            if self.level is not None:
+                self.battery_pill(context, x, top + (ISLAND_HEIGHT - PILL_HEIGHT) / 2)
+                x += PILL_WIDTH + ISLAND_SPACING
+            if clock_layout:
+                context.set_source_rgba(*TEXT_COLOR)
+                context.move_to(x, top + (ISLAND_HEIGHT - clock_h) / 2)
+                PangoCairo.show_layout(context, clock_layout)
+        return True
+
+    def island(self, context, x, y, width):
+        rounded_rectangle(context, x, y, width, ISLAND_HEIGHT, ISLAND_HEIGHT / 2)
+        context.set_source_rgba(*ISLAND_COLOR)
+        context.fill()
+
+    def battery_pill(self, context, x, y):
+        radius = PILL_HEIGHT / 2
+        rounded_rectangle(context, x, y, PILL_WIDTH, PILL_HEIGHT, radius)
+        context.set_source_rgba(*PILL_TRACK)
+        context.fill()
+
+        fill_width = PILL_WIDTH * self.level / 100
+        fill = PILL_CHARGING if self.charging else PILL_LOW if self.level <= LOW_BATTERY else PILL_FILL
+        context.save()
+        rounded_rectangle(context, x, y, PILL_WIDTH, PILL_HEIGHT, radius)
+        context.clip()
+        context.rectangle(x, y, fill_width, PILL_HEIGHT)
+        context.set_source_rgba(*fill)
+        context.fill()
+        context.restore()
+
+        text = ("󱐋" if self.charging else "") + str(self.level)
+        layout = self.layout(context, text, PILL_FONT)
+        w, h = layout.get_pixel_size()
+        tx, ty = x + (PILL_WIDTH - w) / 2, y + (PILL_HEIGHT - h) / 2
+        # dark text over the filled part, light text over the track
+        for clip_x, clip_w, color in ((x, fill_width, PILL_TEXT_ON_FILL),
+                                      (x + fill_width, PILL_WIDTH - fill_width, TEXT_COLOR)):
+            if clip_w <= 0:
+                continue
+            context.save()
+            context.rectangle(clip_x, y, clip_w, PILL_HEIGHT)
+            context.clip()
+            context.set_source_rgba(*color)
+            context.move_to(tx, ty)
+            PangoCairo.show_layout(context, layout)
+            context.restore()
+
+
+def main():
+    StatusBar().show_all()
+    Gtk.main()
+
+
+if __name__ == "__main__":
+    main()

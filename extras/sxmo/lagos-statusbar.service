@@ -1,0 +1,7 @@
+[Unit]
+Description=Status bar: two islands around the camera (replaces swaybar)
+
+[Service]
+Type=simple
+Restart=always
+ExecStart=/home/nikuzo/.local/bin/lagos-statusbar

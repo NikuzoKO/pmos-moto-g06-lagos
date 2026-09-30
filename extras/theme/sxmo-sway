@@ -233,28 +233,8 @@ bindsym $mod+r mode "resize"
 # Status Bar:
 #
 # Read `man 5 sway-bar` for more information about this section.
-bar {
-    position top
-
-    # When the status_command prints a new line to stdout, swaybar updates.
-    # The default just shows the current date and time.
-    status_command sxmo_status_watch.sh -o pango
-
-    pango_markup enabled
-
-    font "Sxmo 11"
-
-    # Rosé Pine, matching the desktop
-    colors {
-        statusline #e0def4
-        background #191724
-        separator #6e6a86
-        focused_workspace #c4a7e7 #c4a7e7 #191724
-        active_workspace #26233a #26233a #e0def4
-        inactive_workspace #191724 #191724 #908caa
-        urgent_workspace #eb6f92 #eb6f92 #191724
-    }
-}
+# No swaybar: ~/.local/bin/lagos-statusbar (superd service) draws the status
+# as two islands around the camera, from the same sxmobar store
 
 for_window [app_id="pinentry-.*"] floating true
 for_window [app_id="foot" title=".*sxmo/modem/.*/draft.txt.*"] resize set height 25
