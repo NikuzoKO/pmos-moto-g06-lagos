@@ -1,4 +1,4 @@
-From c1c76dd56d9a9a1925cb48dff8a26508f4e81114 Mon Sep 17 00:00:00 2001
+From da4bafb29646756a4f4ff75fb1b66c8c1fb45e63 Mon Sep 17 00:00:00 2001
 From: nikuzo <buelaniki@gmail.com>
 Date: Tue, 29 Sep 2026 22:29:05 -0300
 Subject: [PATCH] plugins: new mtk-ccci plugin for MediaTek SoC modems
@@ -6,10 +6,16 @@ Subject: [PATCH] plugins: new mtk-ccci plugin for MediaTek SoC modems
 MediaTek SoC modems (MT6768 and friends) talk AT over CCCI character
 devices and carry data on the ccmni network interfaces, but +CGACT
 contexts are never bound to those interfaces. Follow the stock RIL
-instead: allow data with AT+EDALLOW=1, activate the PDN on ccmni<N> with
-AT+EAPNACT=1,"<apn>","default",<N>, find its id and DNS servers with
+instead: allow data with AT+EDALLOW=1, activate the PDN with
+AT+EAPNACT=1,"<apn>","default",0, take the ccmni the modem picked from
+the +EIF: <id>, ifup URC (<id> % 100), confirm it with
+AT+EIF=<id>,"ifst","up",<type>, find the PDN id and DNS servers with
 +CGCONTRDP and its addresses with AT+EPDN=<id>,"addr" (static IPv4, IPv6
 link-local for SLAAC), and deactivate it with AT+EAPNACT=0,<id>,0.
+
+Every +EIF: <id>, ifdown must be confirmed with
+AT+EIF=<id>,"ifst","down",0 as the stock NetAgent does, or the modem
+keeps the interface reserved and runs out of them (+CME ERROR: 3843).
 
 Ports are selected with the ID_MM_MTK_CCCI udev tag.
 ---
@@ -17,12 +23,12 @@ Ports are selected with the ID_MM_MTK_CCCI udev tag.
  meson_options.txt                             |   1 +
  src/plugins/meson.build                       |  14 +
  src/plugins/mm-builtin-plugins.c              |   6 +
- .../mtk-ccci/mm-broadband-bearer-mtk-ccci.c   | 726 ++++++++++++++++++
+ .../mtk-ccci/mm-broadband-bearer-mtk-ccci.c   | 875 ++++++++++++++++++
  .../mtk-ccci/mm-broadband-bearer-mtk-ccci.h   |  59 ++
- .../mtk-ccci/mm-broadband-modem-mtk-ccci.c    | 113 +++
- .../mtk-ccci/mm-broadband-modem-mtk-ccci.h    |  49 ++
+ .../mtk-ccci/mm-broadband-modem-mtk-ccci.c    | 189 ++++
+ .../mtk-ccci/mm-broadband-modem-mtk-ccci.h    |  51 +
  src/plugins/mtk-ccci/mm-plugin-mtk-ccci.c     |  82 ++
- 9 files changed, 1051 insertions(+)
+ 9 files changed, 1278 insertions(+)
  create mode 100644 src/plugins/mtk-ccci/mm-broadband-bearer-mtk-ccci.c
  create mode 100644 src/plugins/mtk-ccci/mm-broadband-bearer-mtk-ccci.h
  create mode 100644 src/plugins/mtk-ccci/mm-broadband-modem-mtk-ccci.c
@@ -104,10 +110,10 @@ index c7f9163..1f65018 100644
  #endif
 diff --git a/src/plugins/mtk-ccci/mm-broadband-bearer-mtk-ccci.c b/src/plugins/mtk-ccci/mm-broadband-bearer-mtk-ccci.c
 new file mode 100644
-index 0000000..93a92dc
+index 0000000..148b7ab
 --- /dev/null
 +++ b/src/plugins/mtk-ccci/mm-broadband-bearer-mtk-ccci.c
-@@ -0,0 +1,726 @@
+@@ -0,0 +1,875 @@
 +/* -*- Mode: C; tab-width: 4; indent-tabs-mode: nil; c-basic-offset: 4 -*- */
 +/*
 + * This program is free software; you can redistribute it and/or modify
@@ -144,11 +150,16 @@ index 0000000..93a92dc
 + * ccmni network interfaces. The stock RIL (libmtk-ril.so) activates PDNs
 + * with MediaTek's own commands, which this bearer follows:
 + *
-+ *   AT+EDALLOW=1                            allow data on this SIM
-+ *   AT+EAPNACT=1,"<apn>","default",<if>     activate a PDN on ccmni<if>
-+ *   AT+CGCONTRDP                            find the activated id (aid) and DNS
-+ *   AT+EPDN=<aid>,"addr"                    IPv4 address / IPv6 link-local
-+ *   AT+EAPNACT=0,<aid>,0                    deactivate
++ *   AT+EDALLOW=1                        allow data on this SIM
++ *   AT+EAPNACT=1,"<apn>","default",0    activate a PDN; the modem picks the
++ *                                       interface and reports it in
++ *                                       +EIF: <id>, ifup, ... where
++ *                                       <id> % 100 is the ccmni index
++ *   AT+EIF=<id>, "ifst", "up", <type>  confirm the interface is up (the
++ *                                       modem module confirms "down")
++ *   AT+CGCONTRDP                        find the activated id (aid) and DNS
++ *   AT+EPDN=<aid>,"addr"                IPv4 address / IPv6 link-local
++ *   AT+EAPNACT=0,<aid>,0                deactivate
 + *
 + * On LTE the network already set up the default bearer on attach (APN from
 + * AT+EIAAPN), so activating the same APN just binds it to the interface.
@@ -234,7 +245,10 @@ index 0000000..93a92dc
 +typedef enum {
 +    CONNECT_STEP_FIRST,
 +    CONNECT_STEP_EDALLOW,
++    CONNECT_STEP_STALE_CHECK,
++    CONNECT_STEP_STALE_DEACTIVATE,
 +    CONNECT_STEP_EAPNACT,
++    CONNECT_STEP_CONFIRM_UP,
 +    CONNECT_STEP_CGCONTRDP,
 +    CONNECT_STEP_EPDN_ADDR,
 +    CONNECT_STEP_LAST,
@@ -246,7 +260,10 @@ index 0000000..93a92dc
 +    MMPort           *data;
 +    ConnectStep       step;
 +    gchar            *apn;
-+    guint             ifid;
++    gint              ifid;
++    guint             eif_id;
++    guint             eif_type;
++    guint             stale_aid;
 +    guint             aid;
 +    MMBearerIpConfig *ipv4_config;
 +    MMBearerIpConfig *ipv6_config;
@@ -262,7 +279,7 @@ index 0000000..93a92dc
 +    g_ptr_array_unref (ctx->dns4);
 +    g_ptr_array_unref (ctx->dns6);
 +    g_free (ctx->apn);
-+    g_object_unref (ctx->data);
++    g_clear_object (&ctx->data);
 +    g_object_unref (ctx->primary);
 +    g_object_unref (ctx->modem);
 +    g_slice_free (ConnectContext, ctx);
@@ -299,45 +316,63 @@ index 0000000..93a92dc
 +               GAsyncResult *res,
 +               GTask        *task)
 +{
-+    ConnectContext   *ctx;
-+    g_autoptr(GError) error = NULL;
++    ConnectContext *ctx;
++    const gchar    *response;
++    const gchar    *eif;
++    GError         *error = NULL;
 +
 +    ctx = g_task_get_task_data (task);
-+    /* An already active PDN (e.g. after a daemon restart) fails here, but
-+     * still shows up in +CGCONTRDP, which decides */
-+    if (!mm_base_modem_at_command_full_finish (modem, res, &error))
-+        mm_obj_warn (g_task_get_source_object (task), "PDN activation failed: %s", error->message);
-+    ctx->step++;
-+    connect_step (task);
-+}
-+
-+static void
-+cgcontrdp_ready (MMBaseModem  *modem,
-+                 GAsyncResult *res,
-+                 GTask        *task)
-+{
-+    MMBroadbandBearerMtkCcci *self;
-+    ConnectContext           *ctx;
-+    const gchar              *response;
-+    g_auto(GStrv)             lines = NULL;
-+    GError                   *error = NULL;
-+    guint                     i;
-+
-+    self = g_task_get_source_object (task);
-+    ctx = g_task_get_task_data (task);
-+
 +    response = mm_base_modem_at_command_full_finish (modem, res, &error);
 +    if (!response) {
-+        g_prefix_error (&error, "couldn't read PDN parameters: ");
++        g_prefix_error (&error, "PDN activation failed: ");
 +        g_task_return_error (task, error);
 +        g_object_unref (task);
 +        return;
 +    }
 +
-+    /* +CGCONTRDP: <aid>,<bearer id>,<apn>,<local addr>,<gw>,<dns1>,<dns2>,...
-+     * The network reports the APN with its operator suffix, e.g.
-+     * "antel.lte.MNC001.MCC748.GPRS"; a dual stack PDN has one line per
-+     * family. */
++    /* The +EIF URC comes before the OK, so it is part of the response */
++    for (eif = strstr (response, "+EIF:"); eif; eif = strstr (eif + 1, "+EIF:")) {
++        g_autofree gchar     *line = NULL;
++        g_autoptr(GPtrArray)  fields = NULL;
++        guint                 id;
++
++        line = g_strndup (eif + strlen ("+EIF:"), strcspn (eif, "\r\n") - strlen ("+EIF:"));
++        fields = split_fields (line);
++        if (fields->len >= 2 &&
++            !g_strcmp0 (g_ptr_array_index (fields, 1), "ifup") &&
++            mm_get_uint_from_str (g_ptr_array_index (fields, 0), &id)) {
++            ctx->eif_id = id;
++            ctx->ifid = id % 100;
++            if (fields->len < 3 || !mm_get_uint_from_str (g_ptr_array_index (fields, 2), &ctx->eif_type))
++                ctx->eif_type = 3;
++            break;
++        }
++    }
++    if (ctx->ifid < 0) {
++        g_task_return_new_error (task, MM_CORE_ERROR, MM_CORE_ERROR_FAILED,
++                                 "PDN activated but the modem reported no interface");
++        g_object_unref (task);
++        return;
++    }
++
++    ctx->step++;
++    connect_step (task);
++}
++
++/* +CGCONTRDP: <aid>,<bearer id>,<apn>,<local addr>,<gw>,<dns1>,<dns2>,...
++ * lists the PDNs bound to an interface. The network reports the APN with its
++ * operator suffix, e.g. "antel.lte.MNC001.MCC748.GPRS"; a dual stack PDN has
++ * one line per family. Returns the aid of the PDN for APN, or UNKNOWN_AID. */
++static guint
++parse_cgcontrdp (const gchar *response,
++                 const gchar *apn,
++                 GPtrArray   *dns4,
++                 GPtrArray   *dns6)
++{
++    g_auto(GStrv) lines = NULL;
++    guint         found = UNKNOWN_AID;
++    guint         i;
++
 +    lines = g_strsplit (response, "\n", -1);
 +    for (i = 0; lines[i]; i++) {
 +        g_autoptr(GPtrArray) fields = NULL;
@@ -351,21 +386,96 @@ index 0000000..93a92dc
 +        fields = split_fields (line + strlen ("+CGCONTRDP:"));
 +        if (fields->len < 3 || !mm_get_uint_from_str (g_ptr_array_index (fields, 0), &aid))
 +            continue;
-+        if (g_ascii_strncasecmp (g_ptr_array_index (fields, 2), ctx->apn, strlen (ctx->apn)) != 0)
++        if (g_ascii_strncasecmp (g_ptr_array_index (fields, 2), apn, strlen (apn)) != 0)
 +            continue;
-+        if (ctx->aid != UNKNOWN_AID && ctx->aid != aid)
++        if (found != UNKNOWN_AID && found != aid)
 +            continue;
-+        ctx->aid = aid;
++        found = aid;
 +
-+        for (j = 5; j < 7 && j < fields->len; j++) {
++        for (j = 5; dns4 && dns6 && j < 7 && j < fields->len; j++) {
 +            gchar    *dns;
 +            gboolean  ipv6 = FALSE;
 +
 +            dns = parse_address (g_ptr_array_index (fields, j), NULL, &ipv6);
 +            if (dns)
-+                g_ptr_array_add (ipv6 ? ctx->dns6 : ctx->dns4, dns);
++                g_ptr_array_add (ipv6 ? dns6 : dns4, dns);
 +        }
 +    }
++    return found;
++}
++
++static void
++stale_check_ready (MMBaseModem  *modem,
++                   GAsyncResult *res,
++                   GTask        *task)
++{
++    ConnectContext *ctx;
++    const gchar    *response;
++
++    ctx = g_task_get_task_data (task);
++    response = mm_base_modem_at_command_full_finish (modem, res, NULL);
++    if (response)
++        ctx->stale_aid = parse_cgcontrdp (response, ctx->apn, NULL, NULL);
++    /* A PDN still bound from before (e.g. the daemon restarted while
++     * connected) must be released first, or the activation fails */
++    ctx->step = (ctx->stale_aid != UNKNOWN_AID) ? CONNECT_STEP_STALE_DEACTIVATE : CONNECT_STEP_EAPNACT;
++    connect_step (task);
++}
++
++static void
++stale_deactivate_ready (MMBaseModem  *modem,
++                        GAsyncResult *res,
++                        GTask        *task)
++{
++    ConnectContext   *ctx;
++    g_autoptr(GError) error = NULL;
++
++    ctx = g_task_get_task_data (task);
++    if (!mm_base_modem_at_command_full_finish (modem, res, &error))
++        mm_obj_dbg (g_task_get_source_object (task), "couldn't release stale PDN %u: %s",
++                    ctx->stale_aid, error->message);
++    ctx->step++;
++    connect_step (task);
++}
++
++static void
++confirm_up_ready (MMBaseModem  *modem,
++                  GAsyncResult *res,
++                  GTask        *task)
++{
++    ConnectContext   *ctx;
++    g_autoptr(GError) error = NULL;
++
++    ctx = g_task_get_task_data (task);
++    if (!mm_base_modem_at_command_full_finish (modem, res, &error))
++        mm_obj_dbg (g_task_get_source_object (task), "couldn't confirm interface %u up: %s",
++                    ctx->eif_id, error->message);
++    ctx->step++;
++    connect_step (task);
++}
++
++static void
++cgcontrdp_ready (MMBaseModem  *modem,
++                 GAsyncResult *res,
++                 GTask        *task)
++{
++    MMBroadbandBearerMtkCcci *self;
++    ConnectContext           *ctx;
++    const gchar              *response;
++    GError                   *error = NULL;
++
++    self = g_task_get_source_object (task);
++    ctx = g_task_get_task_data (task);
++
++    response = mm_base_modem_at_command_full_finish (modem, res, &error);
++    if (!response) {
++        g_prefix_error (&error, "couldn't read PDN parameters: ");
++        g_task_return_error (task, error);
++        g_object_unref (task);
++        return;
++    }
++
++    ctx->aid = parse_cgcontrdp (response, ctx->apn, ctx->dns4, ctx->dns6);
 +
 +    if (ctx->aid == UNKNOWN_AID) {
 +        g_task_return_new_error (task, MM_CORE_ERROR, MM_CORE_ERROR_FAILED,
@@ -436,6 +546,11 @@ index 0000000..93a92dc
 +            mm_bearer_ip_config_set_method (ctx->ipv6_config, MM_BEARER_IP_METHOD_STATIC);
 +            mm_bearer_ip_config_set_address (ctx->ipv6_config, address);
 +            mm_bearer_ip_config_set_prefix (ctx->ipv6_config, prefix ? prefix : 64);
++            /* The modem reports no gateway, NetworkManager requires one.
++             * ccmni is a raw IP NOARP link, so any other link-local next
++             * hop reaches the network */
++            mm_bearer_ip_config_set_gateway (ctx->ipv6_config,
++                                             g_strcmp0 (address, "fe80::1") ? "fe80::1" : "fe80::2");
 +            if (ctx->dns6->len) {
 +                g_ptr_array_add (ctx->dns6, NULL);
 +                mm_bearer_ip_config_set_dns (ctx->ipv6_config, (const gchar **) ctx->dns6->pdata);
@@ -486,11 +601,34 @@ index 0000000..93a92dc
 +                                       task);
 +        return;
 +
++    case CONNECT_STEP_STALE_CHECK:
++        mm_base_modem_at_command_full (ctx->modem,
++                                       MM_IFACE_PORT_AT (ctx->primary),
++                                       "+CGCONTRDP",
++                                       10,
++                                       FALSE, FALSE,
++                                       g_task_get_cancellable (task),
++                                       (GAsyncReadyCallback) stale_check_ready,
++                                       task);
++        return;
++
++    case CONNECT_STEP_STALE_DEACTIVATE:
++        command = g_strdup_printf ("+EAPNACT=0,%u,0", ctx->stale_aid);
++        mm_base_modem_at_command_full (ctx->modem,
++                                       MM_IFACE_PORT_AT (ctx->primary),
++                                       command,
++                                       MM_BASE_BEARER_DEFAULT_DISCONNECTION_TIMEOUT,
++                                       FALSE, FALSE,
++                                       g_task_get_cancellable (task),
++                                       (GAsyncReadyCallback) stale_deactivate_ready,
++                                       task);
++        return;
++
 +    case CONNECT_STEP_EAPNACT: {
 +        g_autofree gchar *apn = NULL;
 +
 +        apn = mm_at_quote_string (ctx->apn);
-+        command = g_strdup_printf ("+EAPNACT=1,%s,\"default\",%u", apn, ctx->ifid);
++        command = g_strdup_printf ("+EAPNACT=1,%s,\"default\",0", apn);
 +        mm_base_modem_at_command_full (ctx->modem,
 +                                       MM_IFACE_PORT_AT (ctx->primary),
 +                                       command,
@@ -501,6 +639,18 @@ index 0000000..93a92dc
 +                                       task);
 +        return;
 +    }
++
++    case CONNECT_STEP_CONFIRM_UP:
++        command = g_strdup_printf ("+EIF=%u, \"ifst\", \"up\", %u", ctx->eif_id, ctx->eif_type);
++        mm_base_modem_at_command_full (ctx->modem,
++                                       MM_IFACE_PORT_AT (ctx->primary),
++                                       command,
++                                       10,
++                                       FALSE, FALSE,
++                                       g_task_get_cancellable (task),
++                                       (GAsyncReadyCallback) confirm_up_ready,
++                                       task);
++        return;
 +
 +    case CONNECT_STEP_CGCONTRDP:
 +        mm_base_modem_at_command_full (ctx->modem,
@@ -525,7 +675,18 @@ index 0000000..93a92dc
 +                                       task);
 +        return;
 +
-+    case CONNECT_STEP_LAST:
++    case CONNECT_STEP_LAST: {
++        g_autofree gchar *ifname = NULL;
++
++        ifname = g_strdup_printf ("ccmni%d", ctx->ifid);
++        ctx->data = mm_base_modem_get_port (ctx->modem, ifname);
++        if (!ctx->data || mm_port_get_port_type (ctx->data) != MM_PORT_TYPE_NET) {
++            g_task_return_new_error (task, MM_CORE_ERROR, MM_CORE_ERROR_FAILED,
++                                     "PDN aid %u is on %s, which isn't a port of this modem",
++                                     ctx->aid, ifname);
++            g_object_unref (task);
++            return;
++        }
 +        self->priv->aid = ctx->aid;
 +        mm_obj_msg (self, "PDN aid %u connected on %s", ctx->aid, mm_port_get_device (ctx->data));
 +        g_task_return_pointer (task,
@@ -533,6 +694,7 @@ index 0000000..93a92dc
 +                               (GDestroyNotify) mm_bearer_connect_result_unref);
 +        g_object_unref (task);
 +        return;
++    }
 +
 +    default:
 +        g_assert_not_reached ();
@@ -550,9 +712,7 @@ index 0000000..93a92dc
 +{
 +    ConnectContext *ctx;
 +    GTask          *task;
-+    MMPort         *data;
 +    const gchar    *apn;
-+    const gchar    *device;
 +
 +    task = g_task_new (self, cancellable, callback, user_data);
 +
@@ -564,8 +724,7 @@ index 0000000..93a92dc
 +        return;
 +    }
 +
-+    data = mm_base_modem_peek_best_data_port (MM_BASE_MODEM (modem), MM_PORT_TYPE_NET);
-+    if (!data) {
++    if (!mm_base_modem_peek_best_data_port (MM_BASE_MODEM (modem), MM_PORT_TYPE_NET)) {
 +        g_task_return_new_error (task, MM_CORE_ERROR, MM_CORE_ERROR_CONNECTED,
 +                                 "couldn't connect: no net port available");
 +        g_object_unref (task);
@@ -575,17 +734,13 @@ index 0000000..93a92dc
 +    ctx = g_slice_new0 (ConnectContext);
 +    ctx->modem = MM_BASE_MODEM (g_object_ref (modem));
 +    ctx->primary = g_object_ref (primary);
-+    ctx->data = g_object_ref (data);
 +    ctx->step = CONNECT_STEP_FIRST;
 +    ctx->apn = g_strdup (apn);
++    ctx->ifid = -1;
++    ctx->stale_aid = UNKNOWN_AID;
 +    ctx->aid = UNKNOWN_AID;
 +    ctx->dns4 = g_ptr_array_new_with_free_func (g_free);
 +    ctx->dns6 = g_ptr_array_new_with_free_func (g_free);
-+
-+    /* ccmni<N> is interface N */
-+    device = mm_port_get_device (data);
-+    if (!g_str_has_prefix (device, "ccmni") || !mm_get_uint_from_str (device + strlen ("ccmni"), &ctx->ifid))
-+        ctx->ifid = 0;
 +
 +    g_task_set_task_data (task, ctx, (GDestroyNotify) connect_context_free);
 +    connect_step (task);
@@ -901,10 +1056,10 @@ index 0000000..6fee534
 +#endif /* MM_BROADBAND_BEARER_MTK_CCCI_H */
 diff --git a/src/plugins/mtk-ccci/mm-broadband-modem-mtk-ccci.c b/src/plugins/mtk-ccci/mm-broadband-modem-mtk-ccci.c
 new file mode 100644
-index 0000000..07ee118
+index 0000000..c6b0e62
 --- /dev/null
 +++ b/src/plugins/mtk-ccci/mm-broadband-modem-mtk-ccci.c
-@@ -0,0 +1,113 @@
+@@ -0,0 +1,189 @@
 +/* -*- Mode: C; tab-width: 4; indent-tabs-mode: nil; c-basic-offset: 4 -*- */
 +/*
 + * This program is free software; you can redistribute it and/or modify
@@ -926,7 +1081,9 @@ index 0000000..07ee118
 +#define _LIBMM_INSIDE_MM
 +#include <libmm-glib.h>
 +
++#include "mm-base-modem-at.h"
 +#include "mm-iface-modem.h"
++#include "mm-log.h"
 +#include "mm-broadband-modem-mtk-ccci.h"
 +#include "mm-broadband-bearer-mtk-ccci.h"
 +
@@ -934,6 +1091,58 @@ index 0000000..07ee118
 +
 +G_DEFINE_TYPE_EXTENDED (MMBroadbandModemMtkCcci, mm_broadband_modem_mtk_ccci, MM_TYPE_BROADBAND_MODEM, 0,
 +                        G_IMPLEMENT_INTERFACE (MM_TYPE_IFACE_MODEM, iface_modem_init))
++
++struct _MMBroadbandModemMtkCcciPrivate {
++    GRegex *eif_ifdown_regex;
++};
++
++/*****************************************************************************/
++/* Interface state confirmation
++ *
++ * The modem reports each PDN interface going down with
++ * +EIF: <id>, ifdown, ... and keeps that interface reserved until the host
++ * confirms it (the stock NetAgent does), whoever brought it down. Without the
++ * confirmation every activation takes a new ccmni, and after ccmni19 they
++ * fail with +CME ERROR: 3843 until the radio is power cycled. */
++
++static void
++eif_ifdown_received (MMPortSerialAt          *port,
++                     GMatchInfo              *match_info,
++                     MMBroadbandModemMtkCcci *self)
++{
++    g_autofree gchar *command = NULL;
++    guint             id;
++
++    if (!mm_get_uint_from_match_info (match_info, 1, &id))
++        return;
++
++    mm_obj_dbg (self, "PDN interface %u (ccmni%u) down, confirming", id, id % 100);
++    command = g_strdup_printf ("+EIF=%u, \"ifst\", \"down\", 0", id);
++    mm_base_modem_at_command (MM_BASE_MODEM (self), command, 10, FALSE, NULL, NULL);
++}
++
++static void
++setup_ports (MMBroadbandModem *_self)
++{
++    MMBroadbandModemMtkCcci *self = MM_BROADBAND_MODEM_MTK_CCCI (_self);
++    MMPortSerialAt          *ports[2];
++    guint                    i;
++
++    MM_BROADBAND_MODEM_CLASS (mm_broadband_modem_mtk_ccci_parent_class)->setup_ports (_self);
++
++    ports[0] = mm_base_modem_peek_port_primary (MM_BASE_MODEM (self));
++    ports[1] = mm_base_modem_peek_port_secondary (MM_BASE_MODEM (self));
++    for (i = 0; i < G_N_ELEMENTS (ports); i++) {
++        if (!ports[i])
++            continue;
++        mm_port_serial_at_add_unsolicited_msg_handler (
++            ports[i],
++            self->priv->eif_ifdown_regex,
++            (MMPortSerialAtUnsolicitedMsgFn) eif_ifdown_received,
++            self,
++            NULL);
++    }
++}
 +
 +/*****************************************************************************/
 +/* Create bearer (Modem interface) */
@@ -1005,6 +1214,21 @@ index 0000000..07ee118
 +static void
 +mm_broadband_modem_mtk_ccci_init (MMBroadbandModemMtkCcci *self)
 +{
++    self->priv = G_TYPE_INSTANCE_GET_PRIVATE (self,
++                                              MM_TYPE_BROADBAND_MODEM_MTK_CCCI,
++                                              MMBroadbandModemMtkCcciPrivate);
++    self->priv->eif_ifdown_regex = g_regex_new ("\\r\\n\\+EIF:\\s*(\\d+)\\s*,\\s*ifdown[^\\r\\n]*\\r\\n",
++                                                G_REGEX_RAW | G_REGEX_OPTIMIZE, 0, NULL);
++}
++
++static void
++finalize (GObject *object)
++{
++    MMBroadbandModemMtkCcci *self = MM_BROADBAND_MODEM_MTK_CCCI (object);
++
++    g_regex_unref (self->priv->eif_ifdown_regex);
++
++    G_OBJECT_CLASS (mm_broadband_modem_mtk_ccci_parent_class)->finalize (object);
 +}
 +
 +static void
@@ -1017,13 +1241,20 @@ index 0000000..07ee118
 +static void
 +mm_broadband_modem_mtk_ccci_class_init (MMBroadbandModemMtkCcciClass *klass)
 +{
++    GObjectClass          *object_class = G_OBJECT_CLASS (klass);
++    MMBroadbandModemClass *broadband_modem_class = MM_BROADBAND_MODEM_CLASS (klass);
++
++    g_type_class_add_private (object_class, sizeof (MMBroadbandModemMtkCcciPrivate));
++
++    object_class->finalize = finalize;
++    broadband_modem_class->setup_ports = setup_ports;
 +}
 diff --git a/src/plugins/mtk-ccci/mm-broadband-modem-mtk-ccci.h b/src/plugins/mtk-ccci/mm-broadband-modem-mtk-ccci.h
 new file mode 100644
-index 0000000..c70bb2e
+index 0000000..d666b22
 --- /dev/null
 +++ b/src/plugins/mtk-ccci/mm-broadband-modem-mtk-ccci.h
-@@ -0,0 +1,49 @@
+@@ -0,0 +1,51 @@
 +/* -*- Mode: C; tab-width: 4; indent-tabs-mode: nil; c-basic-offset: 4 -*- */
 +/*
 + * This program is free software; you can redistribute it and/or modify
@@ -1053,9 +1284,11 @@ index 0000000..c70bb2e
 +
 +typedef struct _MMBroadbandModemMtkCcci MMBroadbandModemMtkCcci;
 +typedef struct _MMBroadbandModemMtkCcciClass MMBroadbandModemMtkCcciClass;
++typedef struct _MMBroadbandModemMtkCcciPrivate MMBroadbandModemMtkCcciPrivate;
 +
 +struct _MMBroadbandModemMtkCcci {
 +    MMBroadbandModem parent;
++    MMBroadbandModemMtkCcciPrivate *priv;
 +};
 +
 +struct _MMBroadbandModemMtkCcciClass {

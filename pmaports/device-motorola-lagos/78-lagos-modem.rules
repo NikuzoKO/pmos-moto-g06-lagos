@@ -13,9 +13,9 @@ SUBSYSTEM=="ccci_node", KERNEL=="ttyC0", \
 	ENV{ID_MM_PHYSDEV_SYSFS_PATH}="/sys/devices/platform/mddriver", \
 	ENV{ID_MM_PHYSDEV_UID}="lagos-modem"
 
-# One data interface is enough for the default PDN; ccmni<N> is PDN
-# interface N in AT+EAPNACT
-SUBSYSTEM=="net", ACTION=="add|change|move", KERNEL=="ccmni0", \
+# The modem picks the ccmni interface for each PDN (+EIF), so hand the
+# first ten to ModemManager
+SUBSYSTEM=="net", ACTION=="add|change|move", KERNEL=="ccmni[0-9]", \
 	ENV{ID_MM_CANDIDATE}="1", \
 	ENV{ID_MM_MTK_CCCI}="1", \
 	ENV{ID_MM_PHYSDEV_SYSFS_PATH}="/sys/devices/platform/mddriver", \
