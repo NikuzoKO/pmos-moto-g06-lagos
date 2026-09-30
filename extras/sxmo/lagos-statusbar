@@ -1,16 +1,22 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: MIT
 # Status bar for sxmo on sway, in place of swaybar: two islands flanking the
-# front camera's punch-hole. Left island: the sxmo status icons (modem,
-# network, wifi, notifications, lock state). Right island: a horizontal
-# battery pill with the percentage inside, then the clock. Volume and mic are
-# left out.
+# front camera's punch-hole, each running out to the screen edge (bent around
+# the display's rounded corner).
+#   left island   the clock, then one icon per app with new notifications
+#                 (tap the island to mark them seen)
+#   right island  the sxmo status icons (modem, network, wifi, lock state...),
+#                 then a horizontal battery pill with the percentage inside.
+#                 Volume and mic are left out.
 #
-# Content comes from sxmo's own status store ($XDG_RUNTIME_DIR/sxmobar, the
-# INI file sxmo_hook_statusbar.sh fills through `sxmobar -a`), watched with
-# inotify, so no polling: sxmo's hooks already update it on modem/network/
-# battery events and once a minute for the clock. The battery level and
-# charging state are read from sysfs whenever the store changes.
+# Everything is event driven, no polling:
+# - status icons and the clock come from sxmo's own store
+#   ($XDG_RUNTIME_DIR/sxmobar, the INI file `sxmobar -a` writes), watched with
+#   inotify; the battery is read from sysfs whenever that store changes.
+# - notifications: a D-Bus monitor connection (BecomeMonitor) sees every
+#   Notify call and dunst's reply with the id; NotificationClosed and dunst's
+#   history signals remove them. An expired popup stays "new" (it went to the
+#   history unseen); dismissed, app-closed or history-removed ones go away.
 # Started from ~/.config/services/lagos-statusbar.service (superd).
 
 import configparser
@@ -24,13 +30,18 @@ gi.require_version("Gtk", "3.0")
 gi.require_version("Gdk", "3.0")
 gi.require_version("GtkLayerShell", "0.1")
 gi.require_version("PangoCairo", "1.0")
-from gi.repository import Gio, GLib, Gtk, GtkLayerShell, Pango, PangoCairo  # noqa: E402
+from gi.repository import Gdk, Gio, GLib, Gtk, GtkLayerShell, Pango, PangoCairo  # noqa: E402
 
 # Logical pixels (sway scales them)
 BAR_HEIGHT = 26  # reserved at the top; the islands sit inside it
 ISLAND_HEIGHT = 22
 ISLAND_PADDING = 10
 ISLAND_SPACING = 7  # between items inside an island
+# The display's corner radius. Android keeps it in the product partition's
+# overlay (rounded_corner_radius), which is gone from this phone, so this is
+# an estimate; the nav bar uses the same value.
+SCREEN_CORNER_RADIUS = 20
+CORNER_CLEARANCE = 1.5  # space kept between an island and the screen's curve
 # Punch-hole: horizontal centre as a fraction of the width, and the gap left
 # free around it (the islands end/start at its edges)
 CAMERA_CENTER = 0.5
@@ -38,13 +49,16 @@ CAMERA_GAP = 34
 ICON_FONT = "DejaVuSansM Nerd Font Propo 11"
 TEXT_FONT = "Roboto Mono Bold 11"
 PILL_FONT = "Roboto Mono Bold 8"
+COUNT_FONT = "Roboto Mono Bold 8"
 PILL_WIDTH = 32
 PILL_HEIGHT = 15
 LOW_BATTERY = 15
+MAX_NOTIFICATION_ICONS = 4
 
 # Rosé Pine, matching the desktop
 ISLAND_COLOR = (0.098, 0.090, 0.141, 1.0)  # base
 TEXT_COLOR = (0.878, 0.871, 0.957, 1.0)  # text
+SUBTLE_COLOR = (0.565, 0.549, 0.667, 1.0)  # subtle
 PILL_TRACK = (0.251, 0.239, 0.322, 1.0)  # highlight med
 PILL_FILL = (0.878, 0.871, 0.957, 1.0)  # text
 PILL_CHARGING = (0.612, 0.812, 0.847, 1.0)  # foam
@@ -58,8 +72,19 @@ NAMED_COLORS = {
     "blue": (0.769, 0.655, 0.906, 1.0),  # iris
 }
 
+# Notification icons: Nerd Font glyphs by desktop-entry hint or app name
+APP_GLYPHS = {
+    "com.whatsapp": "",
+    "org.telegram": "",
+    "org.sxmo.sms": "\U000f0361",
+    "sms": "\U000f0361",
+    "call": "\U000f03f2",
+    "mail": "\U000f01ee",
+}
+DEFAULT_GLYPH = "\U000f009a"  # bell
+
 STORE = os.path.join(os.environ.get("XDG_RUNTIME_DIR", "/run/user/%d" % os.getuid()), "sxmobar")
-LEFT_EXCLUDE = ("time", "volume", "mic", "battery")  # prefixes; the right island draws its own
+LEFT_OUT = ("time", "volume", "mic", "battery")  # store items not shown as status icons
 
 
 def rounded_rectangle(context, x, y, width, height, radius):
@@ -70,6 +95,23 @@ def rounded_rectangle(context, x, y, width, height, radius):
     context.arc(x + radius, y + height - radius, radius, math.pi / 2, math.pi)
     context.arc(x + radius, y + radius, radius, math.pi, 3 * math.pi / 2)
     context.close_path()
+
+
+def corner_inset(top, height):
+    """How far from the side a pill (rounded ends, radius height/2) spanning
+    top..top+height must start so its end stays inside the screen's rounded
+    corner, CORNER_CLEARANCE away from the curve."""
+    radius = height / 2
+    corner = SCREEN_CORNER_RADIUS
+    allowed = corner - radius - CORNER_CLEARANCE  # max distance between the two centres
+    dy = corner - (top + radius)
+    if allowed <= 0:
+        return corner
+    if dy <= 0:  # the pill's centre is level with or past the corner's: only the side wall limits it
+        return max(CORNER_CLEARANCE, corner - allowed - radius)
+    if dy >= allowed:
+        return corner - radius
+    return max(0.0, corner - math.sqrt(allowed ** 2 - dy ** 2) - radius)
 
 
 def color_of(name):
@@ -101,7 +143,6 @@ def read_store():
             "priority": priority,
             "content": section.get("content", "").strip(),
             "color": section.get("fg_color", "default"),
-            "bold": section.get("weight", "normal") == "bold",
         })
     items.sort(key=lambda item: item["priority"])
     return items
@@ -136,6 +177,121 @@ def read_battery(path):
     return level, charging
 
 
+class NotificationTracker:
+    """Keeps {id: app key} of notifications that count as new, from a D-Bus
+    monitor connection. The filter runs on GDBus's worker thread; every change
+    is handed to the main loop with GLib.idle_add."""
+
+    RULES = [
+        "type='method_call',interface='org.freedesktop.Notifications',member='Notify'",
+        "type='method_return'",
+        "type='signal',interface='org.freedesktop.Notifications',member='NotificationClosed'",
+        "type='signal',interface='org.dunstproject.cmd0'",
+    ]
+
+    def __init__(self, on_change):
+        self.on_change = on_change
+        self.new = {}  # id -> app key, insertion order = arrival order
+        self.pending = {}  # (caller, serial) -> app key, until dunst replies with the id
+        self.connection = None
+        self.connect()
+
+    def connect(self):
+        try:
+            address = Gio.dbus_address_get_for_bus_sync(Gio.BusType.SESSION, None)
+            self.connection = Gio.DBusConnection.new_for_address_sync(
+                address,
+                Gio.DBusConnectionFlags.AUTHENTICATION_CLIENT | Gio.DBusConnectionFlags.MESSAGE_BUS_CONNECTION,
+                None, None)
+            self.connection.add_filter(self.filter)
+            self.connection.call_sync(
+                "org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus.Monitoring",
+                "BecomeMonitor", GLib.Variant("(asu)", (self.RULES, 0)), None,
+                Gio.DBusCallFlags.NONE, -1, None)
+            self.connection.connect("closed", lambda *_: GLib.timeout_add_seconds(5, self.reconnect))
+        except GLib.Error as error:
+            print("notification monitor unavailable:", error.message, flush=True)
+            GLib.timeout_add_seconds(10, self.reconnect)
+
+    def reconnect(self):
+        self.connect()
+        return False
+
+    def filter(self, connection, message, incoming):
+        if not incoming:  # our own BecomeMonitor call
+            return message
+        kind = message.get_message_type()
+        if kind == Gio.DBusMessageType.METHOD_CALL and message.get_member() == "Notify":
+            body = message.get_body()
+            if body is not None and body.n_children() >= 7:
+                app_name = body.get_child_value(0).get_string()
+                replaces = body.get_child_value(1).get_uint32()
+                entry = body.get_child_value(6).lookup_value("desktop-entry", GLib.VariantType("s"))
+                key = (entry.get_string() if entry else app_name or "").strip()
+                if replaces:
+                    GLib.idle_add(self.add, replaces, key)
+                else:
+                    self.pending[(message.get_sender(), message.get_serial())] = key
+        elif kind == Gio.DBusMessageType.METHOD_RETURN:
+            key = self.pending.pop((message.get_destination(), message.get_reply_serial()), None)
+            if key is not None:
+                body = message.get_body()
+                if body is not None and body.get_type_string() == "(u)":
+                    GLib.idle_add(self.add, body.get_child_value(0).get_uint32(), key)
+        elif kind == Gio.DBusMessageType.SIGNAL:
+            member = message.get_member()
+            body = message.get_body()
+            if member == "NotificationClosed" and body is not None:
+                notification_id, reason = body.unpack()
+                if reason != 1:  # 1 = expired: moved to the history unseen
+                    GLib.idle_add(self.remove, notification_id)
+            elif member == "NotificationHistoryRemoved" and body is not None:
+                GLib.idle_add(self.remove, body.unpack()[0])
+            elif member == "NotificationHistoryCleared":
+                GLib.idle_add(self.clear)
+        if len(self.pending) > 64:  # replies that never came
+            self.pending.clear()
+        # Calls and signals seen as a monitor must not reach GDBus (it would answer
+        # the calls, and a monitor that sends gets disconnected); replies must, or
+        # our own BecomeMonitor call never completes
+        if kind in (Gio.DBusMessageType.METHOD_CALL, Gio.DBusMessageType.SIGNAL):
+            return None
+        return message
+
+    def add(self, notification_id, key):
+        self.new.pop(notification_id, None)
+        self.new[notification_id] = key
+        self.on_change()
+        return False
+
+    def remove(self, notification_id):
+        if self.new.pop(notification_id, None) is not None:
+            self.on_change()
+        return False
+
+    def clear(self):
+        if self.new:
+            self.new.clear()
+            self.on_change()
+        return False
+
+    def apps(self):
+        """App keys, most recent first, one per app."""
+        seen = []
+        for key in reversed(list(self.new.values())):
+            if key not in seen:
+                seen.append(key)
+        return seen
+
+
+def glyph_for(key):
+    lowered = key.lower()
+    for name, glyph in APP_GLYPHS.items():
+        if lowered == name or lowered.startswith(name + ".") or name in lowered:
+            return glyph
+    return DEFAULT_GLYPH
+
+
 class StatusBar(Gtk.Window):
     def __init__(self):
         super().__init__()
@@ -151,25 +307,20 @@ class StatusBar(Gtk.Window):
         visual = self.get_screen().get_rgba_visual()
         if visual:
             self.set_visual(visual)
+        self.add_events(Gdk.EventMask.BUTTON_RELEASE_MASK)
         self.connect("draw", self.on_draw)
-        # touches go through to lisgd's top-edge swipe like before (it reads evdev anyway)
-        self.connect("realize", lambda *_: self.input_shape_combine_region(cairo.Region()))
+        self.connect("button-release-event", self.on_release)
+        self.left_island = None  # (x, width) of the left island, for taps and the input region
 
         self.battery_path = find_battery()
         self.items = []
         self.level, self.charging = None, False
+        self.notifications = NotificationTracker(self.queue_draw)
         self.reload()
 
-        # sxmobar rewrites the file (and may replace it), so watch the directory entry
         self.monitor = Gio.File.new_for_path(STORE).monitor_file(Gio.FileMonitorFlags.WATCH_MOVES, None)
         self.monitor.set_rate_limit(100)
-        self.monitor.connect("changed", self.on_store_changed)
-
-    def on_store_changed(self, monitor, file, other, event):
-        if event in (Gio.FileMonitorEvent.CHANGES_DONE_HINT, Gio.FileMonitorEvent.CREATED,
-                     Gio.FileMonitorEvent.RENAMED, Gio.FileMonitorEvent.MOVED_IN,
-                     Gio.FileMonitorEvent.CHANGED):
-            self.reload()
+        self.monitor.connect("changed", lambda *_: self.reload())
 
     def reload(self):
         items = read_store()
@@ -179,6 +330,22 @@ class StatusBar(Gtk.Window):
             self.level, self.charging = battery
             self.queue_draw()
 
+    def on_release(self, widget, event):
+        if self.left_island and self.left_island[0] <= event.x <= self.left_island[0] + self.left_island[1]:
+            self.notifications.clear()
+        return True
+
+    def set_input_island(self, island):
+        """Only the left island takes touches (to mark notifications seen); the
+        rest of the bar lets them through."""
+        if island == self.left_island or not self.get_window():
+            return
+        self.left_island = island
+        region = cairo.Region()
+        if island:
+            region = cairo.Region(cairo.RectangleInt(int(island[0]), 0, int(island[1]), BAR_HEIGHT))
+        self.input_shape_combine_region(region)
+
     # --- drawing ------------------------------------------------------------
 
     def layout(self, context, text, font):
@@ -187,6 +354,13 @@ class StatusBar(Gtk.Window):
         layout.set_text(text, -1)
         return layout
 
+    def show(self, context, layout, x, top, color):
+        w, h = layout.get_pixel_size()
+        context.set_source_rgba(*color)
+        context.move_to(x, top + (ISLAND_HEIGHT - h) / 2)
+        PangoCairo.show_layout(context, layout)
+        return w
+
     def on_draw(self, widget, context):
         context.set_operator(cairo.OPERATOR_SOURCE)
         context.set_source_rgba(0, 0, 0, 0)
@@ -194,53 +368,49 @@ class StatusBar(Gtk.Window):
         context.set_operator(cairo.OPERATOR_OVER)
 
         width = self.get_allocated_width()
+        top = (BAR_HEIGHT - ISLAND_HEIGHT) / 2
+        inset = corner_inset(top, ISLAND_HEIGHT)
         camera_left = width * CAMERA_CENTER - CAMERA_GAP / 2
         camera_right = width * CAMERA_CENTER + CAMERA_GAP / 2
-        top = (BAR_HEIGHT - ISLAND_HEIGHT) / 2
 
-        # left island: sxmo icons, right-aligned against the camera
-        icons = []
-        for item in self.items:
-            if item["name"].startswith(LEFT_EXCLUDE) or not item["content"]:
-                continue
-            icons.append((self.layout(context, item["content"], ICON_FONT), color_of(item["color"])))
-        if icons:
-            sizes = [layout.get_pixel_size() for layout, _ in icons]
-            inner = sum(w for w, _ in sizes) + ISLAND_SPACING * (len(icons) - 1)
-            island_width = inner + 2 * ISLAND_PADDING
-            x = max(0, camera_left - island_width)
-            self.island(context, x, top, island_width)
-            x += ISLAND_PADDING
-            for (layout, color), (w, h) in zip(icons, sizes):
-                context.set_source_rgba(*color)
-                context.move_to(x, top + (ISLAND_HEIGHT - h) / 2)
-                PangoCairo.show_layout(context, layout)
-                x += w + ISLAND_SPACING
-
-        # right island: battery pill, then the clock
+        # left island: screen edge to camera; clock, then notification icons
+        left_width = camera_left - inset
+        self.island(context, inset, top, left_width)
+        x = inset + ISLAND_PADDING
         clock = next((item["content"] for item in self.items if item["name"] == "time"), "")
-        clock_layout = self.layout(context, clock, TEXT_FONT) if clock else None
-        clock_w, clock_h = clock_layout.get_pixel_size() if clock_layout else (0, 0)
-        parts = []
+        if clock:
+            x += self.show(context, self.layout(context, clock, TEXT_FONT), x, top, TEXT_COLOR) + ISLAND_SPACING + 2
+        apps = self.notifications.apps()
+        for key in apps[:MAX_NOTIFICATION_ICONS]:
+            x += self.show(context, self.layout(context, glyph_for(key), ICON_FONT), x, top, TEXT_COLOR) + ISLAND_SPACING
+        if len(apps) > MAX_NOTIFICATION_ICONS:
+            self.show(context, self.layout(context, "+%d" % (len(apps) - MAX_NOTIFICATION_ICONS), COUNT_FONT),
+                      x, top, SUBTLE_COLOR)
+        self.set_input_island((inset, left_width))
+
+        # right island: camera to screen edge; status icons, battery pill at the end
+        right_end = width - inset
+        self.island(context, camera_right, top, right_end - camera_right)
+        x = right_end - ISLAND_PADDING
         if self.level is not None:
-            parts.append(PILL_WIDTH)
-        if clock_layout:
-            parts.append(clock_w)
-        if parts:
-            island_width = sum(parts) + ISLAND_SPACING * (len(parts) - 1) + 2 * ISLAND_PADDING
-            x = min(camera_right, width - island_width)
-            self.island(context, x, top, island_width)
-            x += ISLAND_PADDING
-            if self.level is not None:
-                self.battery_pill(context, x, top + (ISLAND_HEIGHT - PILL_HEIGHT) / 2)
-                x += PILL_WIDTH + ISLAND_SPACING
-            if clock_layout:
-                context.set_source_rgba(*TEXT_COLOR)
-                context.move_to(x, top + (ISLAND_HEIGHT - clock_h) / 2)
-                PangoCairo.show_layout(context, clock_layout)
+            x -= PILL_WIDTH
+            self.battery_pill(context, x, top + (ISLAND_HEIGHT - PILL_HEIGHT) / 2)
+            x -= ISLAND_SPACING
+        for item in reversed(self.items):
+            if item["name"].startswith(LEFT_OUT) or not item["content"]:
+                continue
+            layout = self.layout(context, item["content"], ICON_FONT)
+            w, _ = layout.get_pixel_size()
+            if x - w < camera_right + ISLAND_PADDING:
+                break
+            x -= w
+            self.show(context, layout, x, top, color_of(item["color"]))
+            x -= ISLAND_SPACING
         return True
 
     def island(self, context, x, y, width):
+        if width <= 0:
+            return
         rounded_rectangle(context, x, y, width, ISLAND_HEIGHT, ISLAND_HEIGHT / 2)
         context.set_source_rgba(*ISLAND_COLOR)
         context.fill()
@@ -261,7 +431,7 @@ class StatusBar(Gtk.Window):
         context.fill()
         context.restore()
 
-        text = ("󱐋" if self.charging else "") + str(self.level)
+        text = ("\U000f140b" if self.charging else "") + str(self.level)
         layout = self.layout(context, text, PILL_FONT)
         w, h = layout.get_pixel_size()
         tx, ty = x + (PILL_WIDTH - w) / 2, y + (PILL_HEIGHT - h) / 2

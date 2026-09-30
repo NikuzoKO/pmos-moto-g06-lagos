@@ -30,6 +30,11 @@ from gi.repository import Gdk, GdkPixbuf, GLib, Gtk, GtkLayerShell, Pango  # noq
 
 # Logical pixels (sway scales them)
 BAR_HEIGHT = 40
+ISLAND_MARGIN = 3  # the bar is one pill, this far from the bottom edge
+# Same estimate as lagos-statusbar: Android's rounded_corner_radius lived in the
+# product partition's overlay, which is gone from this phone
+SCREEN_CORNER_RADIUS = 20
+CORNER_CLEARANCE = 1.5
 ICON_SIZE = 16
 RIPPLE_RADIUS = 20
 CARD_HEIGHT = 64
@@ -126,6 +131,22 @@ class KeyboardProbe(Gtk.Window):
 
 def rgba(context, color):
     context.set_source_rgba(*color)
+
+
+def corner_inset(edge_margin, height):
+    """How far from the side a pill (radius height/2) edge_margin away from the
+    top/bottom edge must start to stay inside the screen's rounded corner."""
+    radius = height / 2
+    corner = SCREEN_CORNER_RADIUS
+    allowed = corner - radius - CORNER_CLEARANCE
+    dy = corner - (edge_margin + radius)
+    if allowed <= 0:
+        return corner
+    if dy <= 0:
+        return max(CORNER_CLEARANCE, corner - allowed - radius)
+    if dy >= allowed:
+        return corner - radius
+    return max(0.0, corner - math.sqrt(allowed ** 2 - dy ** 2) - radius)
 
 
 def rounded_rectangle(context, x, y, width, height, radius):
@@ -358,17 +379,20 @@ class NavBar(Gtk.Window):
         GtkLayerShell.set_namespace(self, "lagos-navbar")
         self.set_size_request(-1, BAR_HEIGHT)
         self.set_app_paintable(True)
+        visual = self.get_screen().get_rgba_visual()
+        if visual:
+            self.set_visual(visual)
         self.connect("draw", self.on_draw)
 
+        # seven equal slots: back, home and recents two slots apart (at ~21%,
+        # 50%, 79% of the width), the keyboard button in the last one
         box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
         box.set_homogeneous(True)
-        # Android's spacing: the three buttons sit in the middle ~70% of the width
-        box.pack_start(Gtk.Box(), True, True, 0)
-        for glyph, handler in (("back", self.back), ("home", self.home), ("recents", self.toggle_recents)):
-            box.pack_start(NavButton(glyph, handler), True, True, 0)
         self.keyboard_button = NavButton("keyboard", self.hide_keyboard)
         self.keyboard_button.set_enabled(False)
-        box.pack_start(self.keyboard_button, True, True, 0)
+        for child in (Gtk.Box(), NavButton("back", self.back), Gtk.Box(), NavButton("home", self.home),
+                      Gtk.Box(), NavButton("recents", self.toggle_recents), self.keyboard_button):
+            box.pack_start(child, True, True, 0)
         self.add(box)
 
         self.probe = KeyboardProbe(self.keyboard_button.set_enabled)
@@ -379,8 +403,15 @@ class NavBar(Gtk.Window):
         self.keyboard_button.set_enabled(False)
 
     def on_draw(self, widget, context):
-        rgba(context, BAR_COLOR)
+        context.set_operator(cairo.OPERATOR_SOURCE)
+        context.set_source_rgba(0, 0, 0, 0)
         context.paint()
+        context.set_operator(cairo.OPERATOR_OVER)
+        height = BAR_HEIGHT - 2 * ISLAND_MARGIN
+        inset = max(ISLAND_MARGIN, corner_inset(ISLAND_MARGIN, height))
+        rounded_rectangle(context, inset, ISLAND_MARGIN, self.get_allocated_width() - 2 * inset, height, height / 2)
+        rgba(context, BAR_COLOR)
+        context.fill()
         return False
 
     def back(self):
