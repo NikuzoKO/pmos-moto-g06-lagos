@@ -15,6 +15,63 @@ set -e
 
 last_check=0
 
+# Seconds until the earliest wakeup alarm of an app under Android Translation
+# Layer (its AlarmManager writes the wall-clock time to
+# $XDG_RUNTIME_DIR/atl-alarms/<pid>); empty if there is none.
+atl_alarm_in() {
+	now="$(date +%s)"
+	best=
+	for f in "$XDG_RUNTIME_DIR"/atl-alarms/*; do
+		[ -f "$f" ] || continue
+		if [ ! -d "/proc/${f##*/}" ]; then
+			rm -f "$f"
+			continue
+		fi
+		d="$(($(cat "$f") - now))"
+		if [ -z "$best" ] || [ "$d" -lt "$best" ]; then
+			best="$d"
+		fi
+	done
+	echo "$best"
+}
+
+# sxmo_suspend.sh plus the ATL alarms. Those can't go through
+# sxmo_hook_mnc.sh: for an imminent or just-passed cron job sxmo takes the
+# sxmo_waiting_cronjob wakelock, which only sxmo_rtcwake.sh (cron) releases.
+lagos_suspend() {
+	suspend_time=99999999
+	cron=
+	mnc="$(sxmo_hook_mnc.sh)"
+	if [ -n "$mnc" ] && [ "$mnc" -gt 0 ] && [ "$mnc" -lt 268435455 ]; then
+		if [ "$mnc" -le 15 ]; then
+			sxmo_wakelock.sh lock sxmo_waiting_cronjob infinite
+			return 1
+		fi
+		suspend_time="$((mnc - 10))"
+		cron=1
+	fi
+	atl="$(atl_alarm_in)"
+	if [ -n "$atl" ]; then
+		if [ "$atl" -le 2 ]; then
+			sleep 1 # let the app handle it (it holds a wakelock meanwhile)
+			return 1
+		fi
+		if [ "$atl" -lt "$suspend_time" ]; then
+			suspend_time="$atl"
+			cron=
+		fi
+	fi
+
+	sxmo_log "calling suspend with suspend_time <$suspend_time>${atl:+ (next ATL alarm in ${atl}s)}"
+	start="$(date +%s)"
+	doas rtcwake -m mem -s "$suspend_time" > /dev/null || return 1
+	time_spent="$(($(date +%s) - start))"
+	if [ -n "$cron" ] && [ "$((time_spent + 15))" -ge "$suspend_time" ]; then
+		sxmo_wakelock.sh lock sxmo_waiting_cronjob infinite
+	fi
+	sxmo_hook_postwake.sh
+}
+
 wait_can_suspend() {
 	if [ "$((last_check + 10))" -gt "$(date +%s)" ]; then
 		return
@@ -31,7 +88,7 @@ while true; do
 
 	# MediaTek's clkchk vetoes the first attempt while PLLs are still on and
 	# lets the retry through, so retry quickly
-	if ! sxmo_suspend.sh; then
+	if ! lagos_suspend; then
 		sleep 0.2
 		continue
 	fi

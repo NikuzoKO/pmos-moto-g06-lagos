@@ -2,7 +2,7 @@
 maintainer=""
 pkgname=device-motorola-lagos
 pkgver=1
-pkgrel=23
+pkgrel=27
 pkgdesc="Motorola Moto G06"
 url="https://postmarketos.org"
 arch="aarch64"
@@ -18,6 +18,7 @@ depends="
 	iw
 	"
 makedepends="devicepkg-dev"
+backup="etc/lagos-modem.conf"
 source="
 	deviceinfo
 	modules-initfs
@@ -55,6 +56,8 @@ source="
 	nftables-lagos.conf
 	lagos-modem
 	lagos-modem.service
+	lagos-modem-init
+	lagos-modem.conf
 	lagos-sensors.service
 	lagos-appstream.service
 	lagos-appstream.timer
@@ -121,6 +124,8 @@ package() {
 		"$pkgdir"/usr/lib/systemd/system/nftables.service.d/lagos.conf
 	install -Dm755 "$srcdir"/lagos-modem "$pkgdir"/usr/bin/lagos-modem
 	install -Dm644 "$srcdir"/lagos-modem.service "$pkgdir"/usr/lib/systemd/system/lagos-modem.service
+	install -Dm755 "$srcdir"/lagos-modem-init "$pkgdir"/usr/bin/lagos-modem-init
+	install -Dm644 "$srcdir"/lagos-modem.conf "$pkgdir"/etc/lagos-modem.conf
 	install -Dm644 "$srcdir"/lagos-sensors.service \
 		"$pkgdir"/usr/lib/systemd/system/lagos-sensors.service
 	install -Dm644 "$srcdir"/lagos-appstream.service \
@@ -162,7 +167,7 @@ e923d4849b4a0abb1282161b5c218d3e610bc3797cd4196818ca949ce4a54df9259fd6de8bf279ce
 76de36782545f0b1fce6c61a0f1453cfb502aa2dced3793921c76cbdc6de9ca66e6ec0bdb065f10bbf629c36a1634524a1ebde177887b7c9986d3a02d3c99fd2  lagos-nvdata
 e42f96ff9d2abb966b435696a4848f83be6bd35e1d07e2c5053c48c32d76f6faed71f348721fa59a7c5c2cd4303dfba01106e0bf7574bba7f516099644c1820d  lagos-bt.service
 47a4d4023dc3d460d399d5be775d85c0869e0d6fe742f6d4816b13fff33aa18be838c441918fe5fd35f72385c2c982fccdba566196342000dd9e9b8f9d45bddc  lagos-wowlan
-577b415418f248eddef13c1e98703f05960445f5d375ca08055441a6a5257c138126839adc79e8766e50d7d49576b73637cf004816d55b7c42dbca5c640c048c  lagos-autosuspend
+fd2d1ca6c6e9b8e662148a4ebe758e6323ebdacc11691283ba6e17714a7dc136aa2d4e68beaa4f8479013a81bff6be2cd26b942e6d39382866deed63bdea6196  lagos-autosuspend
 f358290dd55c4c21accaf74647cfcce9f83b99addfe2860b80cee0f43543fba7e617b3dcb23f519c2d91f83a6f16f53a10106a9caa33f4ee7f25af2699e19883  sxmo_autosuspend.service
 ad61b4ce13c5feb6268a59a85d7c1dd89522b8d4fd874a02a85acf3c99422b78fd6f64bf6e1c39832f8751c6d7b089b24d00b519ceb92b25ce7b357c081d70f4  lagos-android-root
 cd22979ebbab01d5133328c15731416c3ff34121ee9b5ec064f44783550b0c6310d9ca9788fa6dbe34a1943ccf1669cf1cc12c6965681077508a77a5c6c977b5  lagos-android-root.service
@@ -176,7 +181,9 @@ f03433268d1e537d8c5b38098d9c09fa8061893290b12d58eedccb13c0bedb8e01f6cb8edee62c62
 abcc3d4ba8d409a941ff937a4c390dcfec4ca9cf33810769fdf8249d3903fa5fef39d1a642c284985524a19f1d7d40edc46db5f049da6b200ab068250c970352  lagos-firewall6.rules
 e63d2d1ea361b978e46bb0bbfa776d73c7f4b4209e30cf646af143ab0ab8c6a545f53519fcb0d2762e4ddda806ff7e2fb76fb17c15a6b35295364f6e456faf4c  nftables-lagos.conf
 08b527a0254a35e2ffbc4b05016ef96fa3ec72862c61514ee5dde2b145933795ec083612dcaeb11e4ddd9f534c4cf5d6e05e1f2b3548ff725cb097893b825679  lagos-modem
-1be73adbc8b6b7d8b448b03a8a58044d58268f148f2e2338b91e7ac9360b22cbf54806bd19ce94722b349299a4673c04f58f73afdec7ea434495dbb90dbe503c  lagos-modem.service
+cf9ec2b785568440944221216cc658179350dcb9a6409ea966b4a2ee9b4da5a714d1a18092d7825120206fbfe0b08f79a953382b0281bd23c31a531d26f7b061  lagos-modem.service
+47440db623638fe286eef4caf74350bb9f05c22c5505977aba4285f8612e77e167253dd44141ef4f1bd05cfe26d3af993648e7409f0044fa05dd47c6ef7042fc  lagos-modem.conf
+e636e2e6eb39e0f93edb366a53106bbee1c9a51f5cc21bfa91a37709ca6db6f2971695d0f466f01e9627dafd0fd2a71a185958f5f110ad5777e5b6892049a138  lagos-modem-init
 69b81bdec979912f47ea5a6c940ea22de03d962fc219dbb21f76e998d4863e473042b6c5051f8fafa717cc9b0150222485274c48f84e5604c9b90777aa5cd4f4  lagos-sensors.service
 e21c457032185268f50f6350942df7c59cee9b7398c33fa314d630261cc8a3aa4a310cf1e0b4c5d57953a837081bcf332aa9783d43d9b8b42881e9f116ecd11c  lagos-appstream.service
 8b4b62671d51c3f3636e6a06e1293326b2ae378054e71c4d371c863c05c3b7385521b7ec483cab017de716a44f181d4332abca2ebf822d1c5badc3e370be63e3  lagos-appstream.timer

@@ -1,0 +1,64 @@
+#!/bin/sh
+# Run once the modem is up, before ModemManager takes ttyC0: the commands the
+# stock MTK RIL (libmtk-ril.so) would send and ModemManager doesn't.
+#
+# AT+EFUN=1  powers SIM 1 up. Without it the SIM task answers +ESIMS: 255 /
+#            CME ERROR 65535 and ModemManager reports sim-missing.
+# AT+EIAAPN  sets MTK's LTE initial-attach APN, and AT+CGDCONT=1 the default
+#            bearer context. With either one missing the network denies EPS
+#            registration and the modem falls back to 3G. Both are set
+#            before EFUN=1 so the first attach uses them. The value comes
+#            from the carrier's "ia" entry in the stock apns-conf.xml and is
+#            set in /etc/lagos-modem.conf (IA_APN, IA_PROTOCOL).
+
+IA_APN=
+IA_PROTOCOL=IPV4V6
+[ -r /etc/lagos-modem.conf ] && . /etc/lagos-modem.conf
+
+port=/dev/ttyC0
+exec 3<>"$port" || exit 1
+
+# at CMD [TIMEOUT]: TIMEOUT is per line, default 5 s
+at() {
+	printf '%s\r' "$1" >&3
+	while IFS= read -r -t "${2:-5}" line <&3; do
+		line="$(printf %s "$line" | tr -d '\r')"
+		[ -n "$line" ] && echo "$1: $line"
+		case "$line" in
+			OK|ERROR|+CME\ ERROR*) [ "$line" = OK ]; return ;;
+		esac
+	done
+	echo "$1: timeout"
+	return 1
+}
+
+# The AT channel may lag behind md1:4 by a moment
+for i in $(seq 20); do
+	at AT >/dev/null && break
+	sleep 0.5
+done
+
+# The modem keeps booting after it answers AT and reports that with URCs
+# (+EIND: 64, +EIND: 128, ...). An EFUN=1 sent before those are out hangs
+# the SIM task: no OK, no SIM, and ~20 s later the modem asserts (fatal
+# 0x1D) and ccci_mdinit resets it. Wait for 3 s of silence (max 20 s).
+for i in $(seq 20); do
+	read -r -t 3 line <&3 || break
+	line="$(printf %s "$line" | tr -d '\r')"
+	[ -n "$line" ] && echo "boot URC: $line"
+done
+
+if [ -n "$IA_APN" ]; then
+	at "AT+CGDCONT=1,\"$IA_PROTOCOL\",\"$IA_APN\""
+	at "AT+EIAAPN=\"$IA_APN\",0,\"$IA_PROTOCOL\",\"$IA_PROTOCOL\",1,\"\",\"\""
+fi
+
+# EFUN=1 takes ~4 s and answers only after the SIM task has come up; at
+# boot the modem's own URCs slow it down further. Check that the SIM
+# actually powered up (+ESIMS: 1) and retry once if not.
+for i in 1 2; do
+	at 'AT+EFUN=1' 30
+	case "$(at 'AT+ESIMS?')" in *'+ESIMS: 1'*) break ;; esac
+	sleep 2
+done
+exit 0
