@@ -1,0 +1,2 @@
+# Torch switch for the video group (the quick settings toggle writes it)
+ACTION=="add", SUBSYSTEM=="flashlight_core", KERNEL=="flashlight", RUN+="/bin/chgrp video /sys%p/flashlight_torch", RUN+="/bin/chmod g+w /sys%p/flashlight_torch"

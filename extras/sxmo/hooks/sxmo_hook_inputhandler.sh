@@ -463,7 +463,9 @@ case "$ACTION" in
 		exit 0
 		;;
 	"downtopedge")
-		sxmo_dmenu.sh isopen || sxmo_appmenu.sh "$WMCLASS" "$WMNAME"
+		# Notification shade with quick toggles (lagos-statusbar); the sxmo
+		# app menu is on Home pressed on an empty workspace
+		sxmo_dmenu.sh isopen || "$HOME"/.local/bin/lagos-shade toggle
 		exit 0
 		;;
 	"twodowntopedge")
@@ -471,6 +473,7 @@ case "$ACTION" in
 		exit 0
 		;;
 	"uptopedge")
+		"$HOME"/.local/bin/lagos-shade close
 		sxmo_dmenu.sh close
 		dunstctl close-all
 		exit 0

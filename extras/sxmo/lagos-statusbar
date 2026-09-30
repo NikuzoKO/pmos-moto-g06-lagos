@@ -3,8 +3,8 @@
 # Status bar for sxmo on sway, in place of swaybar: two islands flanking the
 # front camera's punch-hole, each running out to the screen edge (bent around
 # the display's rounded corner).
-#   left island   the clock, then one icon per app with new notifications
-#                 (tap the island to mark them seen)
+#   left island   the clock, then one icon per app with notifications not
+#                 dismissed yet (tap the island to open the shade)
 #   right island  the sxmo status icons (modem, network, wifi, lock state...),
 #                 then a horizontal battery pill with the percentage inside.
 #                 Volume and mic are left out.
@@ -17,11 +17,17 @@
 #   Notify call and dunst's reply with the id; NotificationClosed and dunst's
 #   history signals remove them. An expired popup stays "new" (it went to the
 #   history unseen); dismissed, app-closed or history-removed ones go away.
+#
+# The notification shade lives here too (it shares the notification list):
+# quick toggles fixed at the top (mobile data, wifi, bluetooth, flashlight),
+# the notifications under them. SIGUSR1 toggles it, SIGUSR2 closes it
+# (lagos-shade sends them; sxmo's first swipe down from the top runs it).
 # Started from ~/.config/services/lagos-statusbar.service (superd).
 
 import configparser
 import math
 import os
+import signal
 
 import cairo
 import gi
@@ -80,9 +86,28 @@ APP_GLYPHS = {
     "sms": "\U000f0361",
     "call": "\U000f03f2",
     "mail": "\U000f01ee",
+    "android-translation-layer": "\U000f0032",  # history entries lose the desktop-entry hint
 }
 DEFAULT_GLYPH = "\U000f009a"  # bell
 
+# Shade
+SHADE_MARGIN = 12
+TILE_SIZE = 54
+CARD_RADIUS = 22
+CARD_PADDING = 14
+FLASHLIGHT = "/sys/class/flashlight_core/flashlight/flashlight_torch"  # "0 0 0 1" = on
+SURFACE_COLOR = (0.149, 0.137, 0.227, 1.0)  # surface
+ACCENT_COLOR = (0.769, 0.655, 0.906, 1.0)  # iris
+SCRIM_COLOR = (0.098, 0.090, 0.141, 0.96)  # base
+GLYPH_MOBILE = "\U000f08be"  # signal bars
+GLYPH_WIFI = "\U000f0928"
+GLYPH_WIFI_OFF = "\U000f05aa"
+GLYPH_BLUETOOTH = "\U000f00af"
+GLYPH_FLASHLIGHT = "\U000f0244"
+GLYPH_CLOSE = "\U000f0156"
+
+RUNTIME = os.environ.get("XDG_RUNTIME_DIR", "/run/user/%d" % os.getuid())
+PIDFILE = os.path.join(RUNTIME, "lagos-statusbar.pid")
 STORE = os.path.join(os.environ.get("XDG_RUNTIME_DIR", "/run/user/%d" % os.getuid()), "sxmobar")
 LEFT_OUT = ("time", "volume", "mic", "battery")  # store items not shown as status icons
 
@@ -178,9 +203,11 @@ def read_battery(path):
 
 
 class NotificationTracker:
-    """Keeps {id: app key} of notifications that count as new, from a D-Bus
-    monitor connection. The filter runs on GDBus's worker thread; every change
-    is handed to the main loop with GLib.idle_add."""
+    """The notifications that are not dismissed yet, Android style: an expired
+    popup stays (it went to dunst's history unseen); dismissed, app-closed or
+    history-removed ones go. Seeded from dunst's history, then kept current
+    from a D-Bus monitor connection. The filter runs on GDBus's worker thread;
+    every change is handed to the main loop with GLib.idle_add."""
 
     RULES = [
         "type='method_call',interface='org.freedesktop.Notifications',member='Notify'",
@@ -191,10 +218,31 @@ class NotificationTracker:
 
     def __init__(self, on_change):
         self.on_change = on_change
-        self.new = {}  # id -> app key, insertion order = arrival order
-        self.pending = {}  # (caller, serial) -> app key, until dunst replies with the id
+        self.entries = {}  # id -> {key, summary, body, time (real µs), displayed}
+        self.pending = {}  # (caller, serial) -> entry, until dunst replies with the id
         self.connection = None
+        self.bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
+        self.seed()
         self.connect()
+
+    def seed(self):
+        try:
+            reply = self.bus.call_sync(
+                "org.freedesktop.Notifications", "/org/freedesktop/Notifications", "org.dunstproject.cmd0",
+                "NotificationListHistory", None, GLib.VariantType("(aa{sv})"), Gio.DBusCallFlags.NONE, 3000, None)
+        except GLib.Error as error:
+            print("dunst history unavailable:", error.message, flush=True)
+            return
+        # dunst's timestamps are monotonic µs
+        offset = GLib.get_real_time() - GLib.get_monotonic_time()
+        for item in reply.unpack()[0]:
+            self.entries[item["id"]] = {
+                "key": item.get("appname", ""),
+                "summary": item.get("summary", ""),
+                "body": item.get("body", ""),
+                "time": item.get("timestamp", 0) + offset,
+                "displayed": False,
+            }
 
     def connect(self):
         try:
@@ -226,24 +274,32 @@ class NotificationTracker:
             if body is not None and body.n_children() >= 7:
                 app_name = body.get_child_value(0).get_string()
                 replaces = body.get_child_value(1).get_uint32()
-                entry = body.get_child_value(6).lookup_value("desktop-entry", GLib.VariantType("s"))
-                key = (entry.get_string() if entry else app_name or "").strip()
+                hint = body.get_child_value(6).lookup_value("desktop-entry", GLib.VariantType("s"))
+                entry = {
+                    "key": (hint.get_string() if hint else app_name or "").strip(),
+                    "summary": body.get_child_value(3).get_string(),
+                    "body": body.get_child_value(4).get_string(),
+                    "time": GLib.get_real_time(),
+                    "displayed": True,
+                }
                 if replaces:
-                    GLib.idle_add(self.add, replaces, key)
+                    GLib.idle_add(self.add, replaces, entry)
                 else:
-                    self.pending[(message.get_sender(), message.get_serial())] = key
+                    self.pending[(message.get_sender(), message.get_serial())] = entry
         elif kind == Gio.DBusMessageType.METHOD_RETURN:
-            key = self.pending.pop((message.get_destination(), message.get_reply_serial()), None)
-            if key is not None:
+            entry = self.pending.pop((message.get_destination(), message.get_reply_serial()), None)
+            if entry is not None:
                 body = message.get_body()
                 if body is not None and body.get_type_string() == "(u)":
-                    GLib.idle_add(self.add, body.get_child_value(0).get_uint32(), key)
+                    GLib.idle_add(self.add, body.get_child_value(0).get_uint32(), entry)
         elif kind == Gio.DBusMessageType.SIGNAL:
             member = message.get_member()
             body = message.get_body()
             if member == "NotificationClosed" and body is not None:
                 notification_id, reason = body.unpack()
-                if reason != 1:  # 1 = expired: moved to the history unseen
+                if reason == 1:  # expired: moved to the history unseen
+                    GLib.idle_add(self.expired, notification_id)
+                else:
                     GLib.idle_add(self.remove, notification_id)
             elif member == "NotificationHistoryRemoved" and body is not None:
                 GLib.idle_add(self.remove, body.unpack()[0])
@@ -258,30 +314,56 @@ class NotificationTracker:
             return None
         return message
 
-    def add(self, notification_id, key):
-        self.new.pop(notification_id, None)
-        self.new[notification_id] = key
+    def add(self, notification_id, entry):
+        self.entries.pop(notification_id, None)
+        self.entries[notification_id] = entry
         self.on_change()
         return False
 
+    def expired(self, notification_id):
+        if notification_id in self.entries:
+            self.entries[notification_id]["displayed"] = False
+        return False
+
     def remove(self, notification_id):
-        if self.new.pop(notification_id, None) is not None:
+        if self.entries.pop(notification_id, None) is not None:
             self.on_change()
         return False
 
     def clear(self):
-        if self.new:
-            self.new.clear()
+        if self.entries:
+            self.entries.clear()
             self.on_change()
         return False
+
+    def newest_first(self):
+        return sorted(self.entries.items(), key=lambda pair: pair[1]["time"], reverse=True)
 
     def apps(self):
         """App keys, most recent first, one per app."""
         seen = []
-        for key in reversed(list(self.new.values())):
-            if key not in seen:
-                seen.append(key)
+        for _, entry in self.newest_first():
+            if entry["key"] not in seen:
+                seen.append(entry["key"])
         return seen
+
+    def _call(self, interface, method, args):
+        self.bus.call("org.freedesktop.Notifications", "/org/freedesktop/Notifications", interface, method,
+                      args, None, Gio.DBusCallFlags.NONE, 3000, None, None)
+
+    def dismiss(self, notification_id):
+        """Gone from the popups and from dunst's history (the signals then drop it
+        here too; drop it right away so the shade doesn't wait for them)."""
+        entry = self.entries.get(notification_id)
+        if entry and entry["displayed"]:
+            self._call("org.freedesktop.Notifications", "CloseNotification", GLib.Variant("(u)", (notification_id,)))
+        self._call("org.dunstproject.cmd0", "NotificationRemoveFromHistory", GLib.Variant("(u)", (notification_id,)))
+        self.remove(notification_id)
+
+    def dismiss_all(self):
+        self._call("org.dunstproject.cmd0", "NotificationCloseAll", None)
+        self._call("org.dunstproject.cmd0", "NotificationClearHistory", None)
+        self.clear()
 
 
 def glyph_for(key):
@@ -290,6 +372,458 @@ def glyph_for(key):
         if lowered == name or lowered.startswith(name + ".") or name in lowered:
             return glyph
     return DEFAULT_GLYPH
+
+
+def rgb_css(color):
+    return "rgba(%d,%d,%d,%.2f)" % (color[0] * 255, color[1] * 255, color[2] * 255, color[3])
+
+
+SHADE_CSS = """
+.shade label { color: %(text)s; }
+.shade .tile-label { font-size: 11px; }
+.shade .tile-detail { font-size: 10px; color: %(subtle)s; }
+.shade .header { font-size: 13px; font-weight: bold; color: %(subtle)s; }
+.shade .summary { font-weight: bold; }
+.shade .body { color: %(subtle)s; }
+.shade .time { font-size: 10px; color: %(subtle)s; }
+.shade .empty { color: %(subtle)s; }
+.shade button { background: none; border: none; box-shadow: none; padding: 0; min-height: 0; min-width: 0; }
+.shade button.clear label { color: %(accent)s; font-weight: bold; font-size: 12px; }
+.shade button.dismiss label { color: %(subtle)s; font-size: 15px; }
+""" % {"text": rgb_css(TEXT_COLOR), "subtle": rgb_css(SUBTLE_COLOR), "accent": rgb_css(ACCENT_COLOR)}
+
+
+def run_async(argv, done=None):
+    """Run a command without blocking; done(ok, stdout) on the main loop."""
+    try:
+        process = Gio.Subprocess.new(argv, Gio.SubprocessFlags.STDOUT_PIPE | Gio.SubprocessFlags.STDERR_SILENCE)
+    except GLib.Error:
+        if done:
+            done(False, "")
+        return
+
+    def finished(proc, result):
+        try:
+            ok, out, _ = proc.communicate_utf8_finish(result)
+            ok = ok and proc.get_successful()
+        except GLib.Error:
+            ok, out = False, ""
+        if done:
+            done(ok, out or "")
+
+    process.communicate_utf8_async(None, None, finished)
+
+
+def time_ago(real_us):
+    seconds = max(0, (GLib.get_real_time() - real_us) // 1000000)
+    if seconds < 60:
+        return "now"
+    if seconds < 3600:
+        return "%dm" % (seconds // 60)
+    if seconds < 86400:
+        return "%dh" % (seconds // 3600)
+    return "%dd" % (seconds // 86400)
+
+
+def plain(text):
+    """dunst allows a little markup in bodies; the shade shows plain text."""
+    try:
+        return Pango.parse_markup(text, -1, "\0")[2]
+    except GLib.Error:
+        return text
+
+
+class Tile(Gtk.Box):
+    """A round quick-settings toggle with its label (and a detail line) under it."""
+
+    def __init__(self, glyph, label, on_tap):
+        super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        self.glyph = glyph
+        self.active = False
+        self.busy = False
+        self.on_tap = on_tap
+        self.pressed = False
+        self.button = Gtk.DrawingArea()
+        self.button.set_size_request(TILE_SIZE, TILE_SIZE)
+        self.button.set_halign(Gtk.Align.CENTER)
+        self.button.add_events(Gdk.EventMask.BUTTON_PRESS_MASK | Gdk.EventMask.BUTTON_RELEASE_MASK)
+        self.button.connect("draw", self.on_draw)
+        self.button.connect("button-press-event", self.on_press)
+        self.button.connect("button-release-event", self.on_release)
+        self.pack_start(self.button, False, False, 0)
+        name = Gtk.Label(label=label)
+        name.get_style_context().add_class("tile-label")
+        self.pack_start(name, False, False, 0)
+        self.detail = Gtk.Label(label="")
+        self.detail.set_ellipsize(Pango.EllipsizeMode.END)
+        self.detail.set_max_width_chars(10)
+        self.detail.get_style_context().add_class("tile-detail")
+        self.pack_start(self.detail, False, False, 0)
+
+    def set_state(self, active, detail="", glyph=None):
+        self.active, self.busy = active, False
+        if glyph:
+            self.glyph = glyph
+        self.detail.set_text(detail)
+        self.button.queue_draw()
+
+    def on_press(self, widget, event):
+        self.pressed = True
+        widget.queue_draw()
+        return True
+
+    def on_release(self, widget, event):
+        self.pressed = False
+        widget.queue_draw()
+        allocation = widget.get_allocation()
+        if 0 <= event.x <= allocation.width and 0 <= event.y <= allocation.height and not self.busy:
+            subprocess_haptic()
+            self.busy = True
+            self.on_tap()
+        return True
+
+    def on_draw(self, widget, context):
+        size = TILE_SIZE
+        context.arc(size / 2, size / 2, size / 2, 0, 2 * math.pi)
+        color = ACCENT_COLOR if self.active else SURFACE_COLOR
+        if self.pressed:
+            color = tuple(min(1.0, c * 1.2) for c in color[:3]) + (1.0,)
+        context.set_source_rgba(*color)
+        context.fill()
+        layout = PangoCairo.create_layout(context)
+        layout.set_font_description(Pango.FontDescription.from_string("DejaVuSansM Nerd Font Propo 18"))
+        layout.set_text(self.glyph, -1)
+        w, h = layout.get_pixel_size()
+        context.move_to((size - w) / 2, (size - h) / 2)
+        glyph_color = ISLAND_COLOR if self.active else TEXT_COLOR
+        if self.busy:
+            glyph_color = SUBTLE_COLOR
+        context.set_source_rgba(*glyph_color)
+        PangoCairo.show_layout(context, layout)
+        return True
+
+
+def subprocess_haptic():
+    run_async(["lagos-vibrate", "12"])
+
+
+class Card(Gtk.EventBox):
+    """One notification: app glyph, summary, body, age, and a dismiss button."""
+
+    def __init__(self, shade, notification_id, entry):
+        super().__init__()
+        self.shade = shade
+        self.notification_id = notification_id
+        self.entry = entry
+        self.pressed = False
+        self.set_visible_window(False)
+        self.connect("draw", self.on_draw)
+        self.connect("button-press-event", self.on_press)
+        self.connect("button-release-event", self.on_release)
+
+        row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        row.set_margin_start(CARD_PADDING + 2)
+        row.set_margin_end(6)
+        row.set_margin_top(CARD_PADDING - 4)
+        row.set_margin_bottom(CARD_PADDING - 4)
+        glyph = Gtk.Label()
+        glyph.set_markup('<span font="DejaVuSansM Nerd Font Propo 16">%s</span>'
+                         % GLib.markup_escape_text(glyph_for(entry["key"])))
+        glyph.set_valign(Gtk.Align.START)
+        glyph.set_margin_top(2)
+        row.pack_start(glyph, False, False, 0)
+
+        texts = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        top = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        summary = Gtk.Label(label=plain(entry["summary"]) or entry["key"], xalign=0)
+        summary.set_ellipsize(Pango.EllipsizeMode.END)
+        summary.get_style_context().add_class("summary")
+        top.pack_start(summary, True, True, 0)
+        age = Gtk.Label(label=time_ago(entry["time"]))
+        age.get_style_context().add_class("time")
+        top.pack_end(age, False, False, 0)
+        texts.pack_start(top, False, False, 0)
+        body_text = plain(entry["body"]).strip()
+        if body_text:
+            body = Gtk.Label(label=body_text, xalign=0)
+            body.set_line_wrap(True)
+            body.set_line_wrap_mode(Pango.WrapMode.WORD_CHAR)
+            body.set_lines(2)
+            body.set_ellipsize(Pango.EllipsizeMode.END)
+            body.get_style_context().add_class("body")
+            texts.pack_start(body, False, False, 0)
+        else:  # the summary is all there is: let it take two lines
+            summary.set_line_wrap(True)
+            summary.set_line_wrap_mode(Pango.WrapMode.WORD_CHAR)
+            summary.set_lines(2)
+        row.pack_start(texts, True, True, 0)
+
+        dismiss = Gtk.Button(label=GLYPH_CLOSE)
+        dismiss.get_style_context().add_class("dismiss")
+        dismiss.set_size_request(40, 40)
+        dismiss.set_valign(Gtk.Align.CENTER)
+        dismiss.connect("clicked", lambda *_: self.shade.dismiss(self))
+        row.pack_end(dismiss, False, False, 0)
+        self.add(row)
+
+    def on_draw(self, widget, context):
+        allocation = self.get_allocation()
+        radius = min(CARD_RADIUS, allocation.height / 2)
+        rounded_rectangle(context, 0, 0, allocation.width, allocation.height, radius)
+        context.set_source_rgba(*(SURFACE_COLOR if not self.pressed else PILL_TRACK))
+        context.fill()
+        return False
+
+    def on_press(self, widget, event):
+        self.pressed = True
+        self.queue_draw()
+        return True
+
+    def on_release(self, widget, event):
+        self.pressed = False
+        self.queue_draw()
+        allocation = self.get_allocation()
+        if 0 <= event.x <= allocation.width and 0 <= event.y <= allocation.height:
+            self.shade.open_notification(self)
+        return True
+
+
+class Shade(Gtk.Window):
+    def __init__(self, notifications):
+        super().__init__()
+        self.notifications = notifications
+        GtkLayerShell.init_for_window(self)
+        GtkLayerShell.set_layer(self, GtkLayerShell.Layer.OVERLAY)
+        for edge in (GtkLayerShell.Edge.TOP, GtkLayerShell.Edge.BOTTOM,
+                     GtkLayerShell.Edge.LEFT, GtkLayerShell.Edge.RIGHT):
+            GtkLayerShell.set_anchor(self, edge, True)
+        # exclusive zone 0: between the status bar and the nav bar, both stay usable
+        GtkLayerShell.set_keyboard_mode(self, GtkLayerShell.KeyboardMode.NONE)
+        GtkLayerShell.set_namespace(self, "lagos-shade")
+        self.set_app_paintable(True)
+        visual = self.get_screen().get_rgba_visual()
+        if visual:
+            self.set_visual(visual)
+        self.get_style_context().add_class("shade")
+        self.connect("draw", self.on_draw)
+
+        # taps on empty space close it, so does a swipe up anywhere
+        outer = Gtk.EventBox()
+        outer.set_visible_window(False)
+        outer.add_events(Gdk.EventMask.BUTTON_PRESS_MASK | Gdk.EventMask.BUTTON_RELEASE_MASK)
+        outer.connect("button-press-event", self.on_outer_press)
+        outer.connect("button-release-event", self.on_outer_release)
+        self.add(outer)
+        self.press_y = None
+
+        layout = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        layout.set_margin_start(SHADE_MARGIN)
+        layout.set_margin_end(SHADE_MARGIN)
+        layout.set_margin_top(10)
+        outer.add(layout)
+
+        tiles = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
+        tiles.set_homogeneous(True)
+        self.mobile = Tile(GLYPH_MOBILE, "Mobile data", self.toggle_mobile)
+        self.wifi = Tile(GLYPH_WIFI, "Wi-Fi", self.toggle_wifi)
+        self.bluetooth = Tile(GLYPH_BLUETOOTH, "Bluetooth", self.toggle_bluetooth)
+        self.flashlight = Tile(GLYPH_FLASHLIGHT, "Flashlight", self.toggle_flashlight)
+        for tile in (self.mobile, self.wifi, self.bluetooth, self.flashlight):
+            tiles.pack_start(tile, True, True, 0)
+        layout.pack_start(tiles, False, False, 0)
+
+        header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
+        header.set_margin_top(14)
+        header.set_margin_bottom(8)
+        title = Gtk.Label(label="Notifications", xalign=0)
+        title.get_style_context().add_class("header")
+        title.set_margin_start(6)
+        header.pack_start(title, True, True, 0)
+        self.clear_button = Gtk.Button(label="Clear all")
+        self.clear_button.get_style_context().add_class("clear")
+        self.clear_button.set_margin_end(6)
+        self.clear_button.connect("clicked", self.on_clear)
+        header.pack_end(self.clear_button, False, False, 0)
+        layout.pack_start(header, False, False, 0)
+
+        self.scroller = Gtk.ScrolledWindow()
+        self.scroller.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        self.scroller.set_kinetic_scrolling(True)
+        self.scroller.set_propagate_natural_height(True)
+        self.list = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        self.list.set_valign(Gtk.Align.START)
+        self.list.set_margin_bottom(10)
+        self.scroller.add(self.list)
+        layout.pack_start(self.scroller, False, False, 0)
+        self.empty = Gtk.Label(label="No notifications")
+        self.empty.get_style_context().add_class("empty")
+        self.empty.set_margin_top(24)
+        layout.pack_start(self.empty, False, False, 0)
+
+        self.refresh_id = None
+        self.tiles_box, self.header_box = tiles, header
+        self.connect("size-allocate", self.on_size)
+
+    def on_size(self, widget, allocation):
+        """The list takes the height left under the tiles and the header, and scrolls past it."""
+        used = 10 + self.tiles_box.get_allocated_height() + self.header_box.get_allocated_height() + 22 + 10
+        height = max(100, allocation.height - used)
+        if self.scroller.get_max_content_height() != height:
+            self.scroller.set_max_content_height(height)
+
+    # --- open/close ---------------------------------------------------------
+
+    def open(self):
+        self.rebuild()
+        self.refresh_toggles()
+        self.show_all()
+        self.update_empty()
+        self.scroller.get_vadjustment().set_value(0)
+        if self.refresh_id is None:  # the toggles' state while it's open (e.g. mobile data connecting)
+            self.refresh_id = GLib.timeout_add_seconds(3, self.periodic_refresh)
+
+    def close(self):
+        if self.get_visible():
+            self.hide()
+        if self.refresh_id is not None:
+            GLib.source_remove(self.refresh_id)
+            self.refresh_id = None
+
+    def toggle(self):
+        if self.get_visible():
+            self.close()
+        else:
+            self.open()
+
+    def periodic_refresh(self):
+        self.refresh_toggles()
+        return True
+
+    def notifications_changed(self):
+        if self.get_visible():
+            self.rebuild()
+            self.list.show_all()
+            self.update_empty()
+
+    def on_draw(self, widget, context):
+        context.set_operator(cairo.OPERATOR_SOURCE)
+        context.set_source_rgba(*SCRIM_COLOR)
+        context.paint()
+        context.set_operator(cairo.OPERATOR_OVER)
+        return False
+
+    def on_outer_press(self, widget, event):
+        self.press_y = event.y
+        return True
+
+    def on_outer_release(self, widget, event):
+        if self.press_y is not None and (event.y < self.press_y - 40 or abs(event.y - self.press_y) < 10):
+            self.close()
+        self.press_y = None
+        return True
+
+    # --- notifications --------------------------------------------------------
+
+    def rebuild(self):
+        for child in self.list.get_children():
+            child.destroy()
+        for notification_id, entry in self.notifications.newest_first():
+            self.list.pack_start(Card(self, notification_id, entry), False, False, 0)
+
+    def update_empty(self):
+        has = bool(self.list.get_children())
+        self.scroller.set_visible(has)
+        self.clear_button.set_visible(has)
+        self.empty.set_visible(not has)
+
+    def dismiss(self, card):
+        subprocess_haptic()
+        self.notifications.dismiss(card.notification_id)
+
+    def open_notification(self, card):
+        """dunst can only fire an app's action while the popup is on screen (a
+        popped history entry has lost its target), so focus the app instead."""
+        subprocess_haptic()
+        key = card.entry["key"]
+        if key and key != "android-translation-layer":
+            run_async(["swaymsg", '[app_id="%s"] focus' % key.replace('"', "")])
+        self.notifications.dismiss(card.notification_id)
+        self.close()
+
+    def on_clear(self, button):
+        subprocess_haptic()
+        self.notifications.dismiss_all()
+
+    # --- toggles --------------------------------------------------------------
+
+    def refresh_toggles(self):
+        run_async(["nmcli", "-t", "-f", "TYPE,NAME", "connection", "show", "--active"], self.got_connections)
+        run_async(["nmcli", "-t", "-g", "WIFI", "radio"], self.got_wifi_radio)
+        run_async(["bluetoothctl", "show"], self.got_bluetooth)
+        try:
+            with open(FLASHLIGHT) as handle:
+                lines = handle.read().splitlines()
+            on = any(line.split()[-1:] == ["1"] for line in lines[1:] if line.strip())
+            self.flashlight.set_state(on, "On" if on else "")
+        except OSError:
+            self.flashlight.set_state(False, "Unavailable")
+
+    def got_connections(self, ok, out):
+        self.active = {}
+        for line in out.splitlines():
+            kind, _, name = line.partition(":")
+            self.active.setdefault(kind, name)
+        gsm = self.active.get("gsm")
+        if not self.mobile.busy:
+            self.mobile.set_state(bool(gsm), gsm or "Off")
+        self.wifi_name = self.active.get("802-11-wireless", "")
+        self.update_wifi()
+
+    def got_wifi_radio(self, ok, out):
+        self.wifi_radio = out.strip() == "enabled"
+        self.update_wifi()
+
+    def update_wifi(self):
+        radio = getattr(self, "wifi_radio", None)
+        if radio is None or self.wifi.busy:
+            return
+        name = getattr(self, "wifi_name", "")
+        detail = name if radio and name else "On" if radio else "Off"
+        self.wifi.set_state(radio, detail, GLYPH_WIFI if radio else GLYPH_WIFI_OFF)
+
+    def got_bluetooth(self, ok, out):
+        powered = "Powered: yes" in out
+        self.bluetooth.set_state(powered, "On" if powered else "Off" if ok else "Unavailable")
+
+    def toggle_mobile(self):
+        def listed(ok, out):
+            names = [line.partition(":")[2] for line in out.splitlines() if line.startswith("gsm:")]
+            if not names:
+                self.mobile.set_state(False, "No APN")
+                return
+            action = "down" if self.mobile.active else "up"
+            self.mobile.detail.set_text("Connecting…" if action == "up" else "Disconnecting…")
+            run_async(["nmcli", "connection", action, "id", names[0]], self.toggled)
+        run_async(["nmcli", "-t", "-f", "TYPE,NAME", "connection", "show"], listed)
+
+    def toggle_wifi(self):
+        run_async(["nmcli", "radio", "wifi", "off" if self.wifi.active else "on"], self.toggled)
+
+    def toggle_bluetooth(self):
+        run_async(["bluetoothctl", "power", "off" if self.bluetooth.active else "on"], self.toggled)
+
+    def toggle_flashlight(self):
+        try:
+            with open(FLASHLIGHT, "w") as handle:
+                handle.write("0 0 0 %d" % (0 if self.flashlight.active else 1))
+        except OSError:
+            pass
+        self.toggled(True, "")
+
+    def toggled(self, ok, out):
+        for tile in (self.mobile, self.wifi, self.bluetooth, self.flashlight):
+            tile.busy = False
+        self.refresh_toggles()
 
 
 class StatusBar(Gtk.Window):
@@ -315,7 +849,8 @@ class StatusBar(Gtk.Window):
         self.battery_path = find_battery()
         self.items = []
         self.level, self.charging = None, False
-        self.notifications = NotificationTracker(self.queue_draw)
+        self.notifications = NotificationTracker(self.notifications_changed)
+        self.shade = Shade(self.notifications)
         self.reload()
 
         self.monitor = Gio.File.new_for_path(STORE).monitor_file(Gio.FileMonitorFlags.WATCH_MOVES, None)
@@ -330,14 +865,19 @@ class StatusBar(Gtk.Window):
             self.level, self.charging = battery
             self.queue_draw()
 
+    def notifications_changed(self):
+        self.queue_draw()
+        if hasattr(self, "shade"):
+            self.shade.notifications_changed()
+
     def on_release(self, widget, event):
         if self.left_island and self.left_island[0] <= event.x <= self.left_island[0] + self.left_island[1]:
-            self.notifications.clear()
+            self.shade.toggle()
         return True
 
     def set_input_island(self, island):
-        """Only the left island takes touches (to mark notifications seen); the
-        rest of the bar lets them through."""
+        """Only the left island takes touches (it opens the shade); the rest of
+        the bar lets them through."""
         if island == self.left_island or not self.get_window():
             return
         self.left_island = island
@@ -450,7 +990,19 @@ class StatusBar(Gtk.Window):
 
 
 def main():
-    StatusBar().show_all()
+    provider = Gtk.CssProvider()
+    provider.load_from_data(SHADE_CSS.encode())
+    Gtk.StyleContext.add_provider_for_screen(Gdk.Screen.get_default(), provider,
+                                             Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+    bar = StatusBar()
+    bar.show_all()
+    GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, signal.SIGUSR1, lambda: bar.shade.toggle() or True)
+    GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, signal.SIGUSR2, lambda: bar.shade.close() or True)
+    try:
+        with open(PIDFILE, "w") as handle:
+            handle.write("%d\n" % os.getpid())
+    except OSError:
+        pass
     Gtk.main()
 
 
