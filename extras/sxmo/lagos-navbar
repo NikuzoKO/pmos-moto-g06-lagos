@@ -9,15 +9,15 @@
 #            opens the sxmo app menu, which is the closest thing to a launcher
 #   recents  full-screen card list of open windows, most recent first; tap a
 #            card to switch to it, x to close it, "Clear all" closes them all
-#   keyboard (bottom right, only while wvkbd is up) hides the keyboard; it is
-#            seen from sway's usable area shrinking (polled over the IPC socket)
+#   keyboard (bottom right, only while wvkbd is up) hides the keyboard. No
+#            polling: an invisible 1px-wide layer surface spans the usable
+#            height, and sway reconfigures it when wvkbd's exclusive zone
+#            comes or goes
 # Started from ~/.config/services/lagos-navbar.service (superd).
 
 import json
 import math
 import os
-import socket
-import struct
 import subprocess
 
 import cairo
@@ -38,7 +38,7 @@ CARD_SPACING = 10
 SIDE_MARGIN = 14
 APP_ICON_SIZE = 36
 HAPTIC_MS = 12
-KEYBOARD_POLL_MS = 300
+KEYBOARD_MIN_HEIGHT = 100  # logical px the usable area must lose to count as a keyboard
 RIPPLE_MS = 250
 
 # Rosé Pine, matching the desktop and the volume overlay
@@ -78,43 +78,50 @@ def sway_json(kind):
         return None
 
 
-class SwayIpc:
-    """Minimal sway IPC client on a kept-open socket (polling without forking swaymsg)."""
+class KeyboardProbe(Gtk.Window):
+    """Invisible, click-through layer surface anchored top/bottom/left, 1px wide,
+    exclusive zone 0: sway sizes it to the usable height (all exclusive zones,
+    wvkbd's included), so every keyboard show/hide arrives as a configure."""
 
-    MAGIC = b"i3-ipc"
+    def __init__(self, on_change):
+        super().__init__()
+        self.on_change = on_change
+        self.visible_state = None
+        GtkLayerShell.init_for_window(self)
+        # OVERLAY, not BOTTOM: behind windows sway sends no frame callbacks and GTK
+        # never applies the new size. Zone-0 surfaces are sized after every
+        # exclusive zone on any layer, so wvkbd's is still subtracted.
+        GtkLayerShell.set_layer(self, GtkLayerShell.Layer.OVERLAY)
+        for edge in (GtkLayerShell.Edge.TOP, GtkLayerShell.Edge.BOTTOM, GtkLayerShell.Edge.LEFT):
+            GtkLayerShell.set_anchor(self, edge, True)
+        GtkLayerShell.set_keyboard_mode(self, GtkLayerShell.KeyboardMode.NONE)
+        GtkLayerShell.set_namespace(self, "lagos-keyboard-probe")
+        self.set_size_request(1, 1)
+        self.set_app_paintable(True)
+        visual = self.get_screen().get_rgba_visual()
+        if visual:
+            self.set_visual(visual)
+        self.connect("draw", self.on_draw)
+        self.connect("realize", lambda *_: self.input_shape_combine_region(cairo.Region()))
+        self.connect("size-allocate", self.on_size)
 
-    def __init__(self):
-        self.sock = None
+    def on_draw(self, widget, context):
+        context.set_operator(cairo.OPERATOR_SOURCE)
+        context.set_source_rgba(0, 0, 0, 0)
+        context.paint()
+        return True
 
-    def request(self, kind):
-        for _ in range(2):
-            try:
-                if self.sock is None:
-                    self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-                    self.sock.connect(os.environ["SWAYSOCK"])
-                self.sock.sendall(self.MAGIC + struct.pack("<II", 0, kind))
-                header = self._read(14)
-                length, _ = struct.unpack("<II", header[6:])
-                return json.loads(self._read(length))
-            except (OSError, KeyError, ValueError):
-                if self.sock:
-                    self.sock.close()
-                self.sock = None
-        return None
-
-    def _read(self, size):
-        data = b""
-        while len(data) < size:
-            chunk = self.sock.recv(size - len(data))
-            if not chunk:
-                raise OSError("sway IPC closed")
-            data += chunk
-        return data
-
-
-GET_WORKSPACES = 1
-GET_OUTPUTS = 3
-SXMO_STATE = os.path.join(os.environ.get("XDG_RUNTIME_DIR", "/run/user/%d" % os.getuid()), "sxmo.state")
+    def on_size(self, widget, allocation):
+        if allocation.height <= 1:  # before the first configure
+            return
+        monitor = self.get_display().get_monitor_at_window(self.get_window()) if self.get_window() else None
+        if monitor is None:
+            return
+        full = monitor.get_geometry().height
+        visible = allocation.height < full - BAR_HEIGHT - KEYBOARD_MIN_HEIGHT
+        if visible != self.visible_state:
+            self.visible_state = visible
+            self.on_change(visible)
 
 
 def rgba(context, color):
@@ -364,31 +371,8 @@ class NavBar(Gtk.Window):
         box.pack_start(self.keyboard_button, True, True, 0)
         self.add(box)
 
-        self.ipc = SwayIpc()
-        GLib.timeout_add(KEYBOARD_POLL_MS, self.poll_keyboard)
-
-    def keyboard_visible(self):
-        """wvkbd reserves an exclusive zone, so the focused workspace ends above our bar."""
-        workspaces = self.ipc.request(GET_WORKSPACES) or []
-        outputs = self.ipc.request(GET_OUTPUTS) or []
-        focused = next((ws for ws in workspaces if ws.get("focused")), None)
-        if not focused:
-            return False
-        output = next((out for out in outputs if out.get("name") == focused.get("output")), None)
-        if not output:
-            return False
-        bottom = focused["rect"]["y"] + focused["rect"]["height"]
-        return bottom < output["rect"]["y"] + output["rect"]["height"] - BAR_HEIGHT - 20
-
-    def poll_keyboard(self):
-        try:
-            with open(SXMO_STATE) as handle:
-                if handle.read().strip() == "screenoff":
-                    return True
-        except OSError:
-            pass
-        self.keyboard_button.set_enabled(self.keyboard_visible())
-        return True
+        self.probe = KeyboardProbe(self.keyboard_button.set_enabled)
+        self.probe.show_all()
 
     def hide_keyboard(self):
         run("sxmo_keyboard.sh", "close")
