@@ -1,0 +1,2 @@
+# Base config, intentionally empty: dunst only reads dunstrc.d/*.conf drop-ins
+# next to a dunstrc that exists. Settings live in dunstrc.d/.

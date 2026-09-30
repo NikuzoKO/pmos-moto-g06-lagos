@@ -25,7 +25,13 @@ font "Sxmo 11"
 
 exec_always sxmo_swayinitconf.sh
 
+# sxmo_bg.sh draws the wallpaper with its own swaybg; without this sway also
+# spawns a bare swaybg that has no output config ("Could not find config for output DSI-1")
+swaybg_command -
+
 exec_always dbus-update-activation-environment WAYLAND_DISPLAY DISPLAY XDG_CURRENT_DESKTOP
+# start graphical-session.target (xdg-desktop-portal needs it; see ~/.config/systemd/user/sxmo-session.target)
+exec "systemctl --user import-environment WAYLAND_DISPLAY DISPLAY XDG_CURRENT_DESKTOP SWAYSOCK; systemctl --user start sxmo-session.target"
 
 mode "menu" {
     # This is slower than remapping the keys using a keymap, but we don't need
