@@ -14,4 +14,30 @@ set -e
 modprobe -a ccci_cldma ccci_ccif ccci_fsm_scp
 
 lagos-android-run /vendor/bin/ccci_rpcd 0 &
-exec lagos-android-run /vendor/bin/ccci_mdinit 0
+
+# ccci_mdinit restarts the modem on its own after a modem exception (MD
+# assert), which drops the SIM power and attach APN that lagos-modem-init
+# set. Its propshim logs every property set: each "md1.status=ready" after
+# the first one (the first is handled by lagos-modem.service ExecStartPost)
+# reruns lagos-modem-init with ModemManager off ttyC0.
+reinit() {
+	set +e
+	echo "modem reset: rerunning lagos-modem-init"
+	systemctl stop ModemManager.service
+	lagos-modem-init
+	systemctl start ModemManager.service
+}
+
+set -o pipefail
+lagos-android-run /vendor/bin/ccci_mdinit 0 2>&1 | {
+	ready=0
+	while IFS= read -r line; do
+		printf '%s\n' "$line"
+		case "$line" in
+		*"set vendor.mtk.md1.status=ready"*)
+			ready=$((ready + 1))
+			[ "$ready" -gt 1 ] && reinit &
+			;;
+		esac
+	done
+}
