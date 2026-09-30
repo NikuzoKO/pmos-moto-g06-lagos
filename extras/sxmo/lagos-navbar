@@ -5,10 +5,14 @@
 # it). Works for every app, not only Android ones:
 #   back     sends Escape to the focused window (ATL maps an unconsumed Escape
 #            to Activity.onBackPressed; native apps close dialogs/menus with it)
-#   home     jumps to an empty workspace (the desktop); pressed again there it
-#            opens the sxmo app menu, which is the closest thing to a launcher
-#   recents  full-screen card list of open windows, most recent first; tap a
-#            card to switch to it, x to close it, "Clear all" closes them all
+#   home     minimizes every window (sway has no minimize: they go to the
+#            scratchpad, tiled ones marked so they tile again on restore);
+#            pressed again on the empty desktop it opens the sxmo app menu,
+#            which is the closest thing to a launcher
+#   recents  full-screen card list of open windows, most recent first,
+#            minimized ones included; tap a card to switch to it (a minimized
+#            one comes back onto the current workspace), x to close it,
+#            "Clear all" closes them all
 #   keyboard (bottom right, only while wvkbd is up) hides the keyboard. No
 #            polling: an invisible 1px-wide layer surface spans the usable
 #            height, and sway reconfigures it when wvkbd's exclusive zone
@@ -38,6 +42,8 @@ CORNER_CLEARANCE = 1.5
 ICON_SIZE = 16
 RIPPLE_RADIUS = 20
 CARD_HEIGHT = 64
+SCRATCHPAD = "__i3_scratch"
+TILED_MARK = "_lagos_tiled"  # sway never draws marks that start with "_"
 CARD_RADIUS = 14
 CARD_SPACING = 10
 SIDE_MARGIN = 14
@@ -179,6 +185,8 @@ def windows_most_recent_first():
                 "app_id": node.get("app_id") or (node.get("window_properties") or {}).get("class") or "",
                 "title": node.get("name") or "",
                 "workspace": workspace,
+                "floating": node.get("type") == "floating_con",
+                "marks": node.get("marks") or [],
             })
         for child in ordered:
             walk(child, workspace)
@@ -422,27 +430,17 @@ class NavBar(Gtk.Window):
 
     def home(self):
         self.recents.dismiss()
-        workspaces = sway_json("get_workspaces") or []
-        tree = sway_json("get_tree") or {}
-        occupied = set()
-
-        def walk(node, workspace):
-            if node.get("type") == "workspace":
-                workspace = node.get("num")
-            if node.get("pid") and workspace is not None:
-                occupied.add(workspace)
-            for child in node.get("nodes", []) + node.get("floating_nodes", []):
-                walk(child, workspace)
-
-        walk(tree, None)
-        focused = next((ws for ws in workspaces if ws.get("focused")), None)
-        if focused and focused.get("num") not in occupied:
+        shown = [w for w in windows_most_recent_first() if w["workspace"] != SCRATCHPAD]
+        if not shown:
             run("sxmo_appmenu.sh")
             return
-        number = 1
-        while number in occupied:
-            number += 1
-        sway(f"workspace number {number}")
+        commands = []
+        for window in shown:
+            criteria = f"[con_id={window['id']}]"
+            if not window["floating"]:
+                commands.append(f"{criteria} mark --add {TILED_MARK}")
+            commands.append(f"{criteria} move scratchpad")
+        sway("; ".join(commands))
 
     def toggle_recents(self):
         if self.recents.get_visible():
@@ -481,7 +479,9 @@ class Card(Gtk.EventBox):
         name_label.set_ellipsize(Pango.EllipsizeMode.END)
         labels.pack_start(name_label, False, False, 0)
         subtitle = title
-        if window["workspace"]:
+        if window["workspace"] == SCRATCHPAD:
+            subtitle = f"{title}  ·  minimized" if title else "minimized"
+        elif window["workspace"]:
             subtitle = f"{title}  ·  ws {window['workspace']}" if title else f"ws {window['workspace']}"
         sub_label = Gtk.Label(label=subtitle, xalign=0)
         sub_label.set_ellipsize(Pango.EllipsizeMode.END)
@@ -519,7 +519,12 @@ class Card(Gtk.EventBox):
         allocation = self.get_allocation()
         if 0 <= event.x <= allocation.width and 0 <= event.y <= allocation.height:
             haptic()
-            sway(f"[con_id={self.window['id']}] focus")
+            criteria = f"[con_id={self.window['id']}]"
+            if TILED_MARK in self.window["marks"]:
+                # focus pulls a scratchpad window out as floating; tile it again
+                sway(f"{criteria} focus; {criteria} floating disable; {criteria} unmark {TILED_MARK}")
+            else:
+                sway(f"{criteria} focus")
             self.recents.dismiss()
         return True
 
