@@ -3,9 +3,20 @@
 # handles ports tagged ID_MM_CCCI_AT_PORT like wwan AT ports, owned by the
 # platform device named in ID_MM_PHYSDEV_SYSFS_PATH. The other CCCI nodes
 # (ccci_fs, ccci_rpc, ...) belong to ccci_mdinit/ccci_rpcd: never tag them.
+# ID_MM_MTK_CCCI selects the mtk-ccci plugin, which brings data up on the
+# ccmni interfaces with MediaTek's AT+EAPNACT.
 SUBSYSTEM=="ccci_node", KERNEL=="ttyC0", \
 	ENV{ID_MM_CANDIDATE}="1", \
 	ENV{ID_MM_CCCI_AT_PORT}="1", \
+	ENV{ID_MM_MTK_CCCI}="1", \
 	ENV{ID_MM_PORT_TYPE_AT_PRIMARY}="1", \
+	ENV{ID_MM_PHYSDEV_SYSFS_PATH}="/sys/devices/platform/mddriver", \
+	ENV{ID_MM_PHYSDEV_UID}="lagos-modem"
+
+# One data interface is enough for the default PDN; ccmni<N> is PDN
+# interface N in AT+EAPNACT
+SUBSYSTEM=="net", ACTION=="add|change|move", KERNEL=="ccmni0", \
+	ENV{ID_MM_CANDIDATE}="1", \
+	ENV{ID_MM_MTK_CCCI}="1", \
 	ENV{ID_MM_PHYSDEV_SYSFS_PATH}="/sys/devices/platform/mddriver", \
 	ENV{ID_MM_PHYSDEV_UID}="lagos-modem"
