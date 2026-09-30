@@ -271,7 +271,8 @@ class NavBar(Gtk.Window):
         super().__init__()
         self.recents = recents
         GtkLayerShell.init_for_window(self)
-        GtkLayerShell.set_layer(self, GtkLayerShell.Layer.TOP)
+        # OVERLAY: sway arranges it before TOP (wvkbd), so the bar takes the bottom edge and the keyboard sits above it
+        GtkLayerShell.set_layer(self, GtkLayerShell.Layer.OVERLAY)
         for edge in (GtkLayerShell.Edge.BOTTOM, GtkLayerShell.Edge.LEFT, GtkLayerShell.Edge.RIGHT):
             GtkLayerShell.set_anchor(self, edge, True)
         GtkLayerShell.auto_exclusive_zone_enable(self)
