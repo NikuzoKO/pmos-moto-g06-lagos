@@ -54,11 +54,22 @@ if [ -n "$IA_APN" ]; then
 fi
 
 # EFUN=1 takes ~4 s and answers only after the SIM task has come up; at
-# boot the modem's own URCs slow it down further. Check that the SIM
-# actually powered up (+ESIMS: 1) and retry once if not.
+# boot the modem's own URCs slow it down further (seen: >30 s). Any byte
+# sent while it runs aborts it, so give it a long timeout. Then wait until
+# the SIM answers AT+CPIN? (SIM PIN / READY): ModemManager probes the SIM
+# once when it takes the port and reports sim-missing if it's not up yet.
+# Retry EFUN=1 only if the SIM did not power up (+ESIMS: 1).
+sim_up() {
+	for i in $(seq 30); do
+		case "$(at 'AT+CPIN?')" in *'+CPIN: '*) return 0 ;; esac
+		sleep 2
+	done
+	return 1
+}
 for i in 1 2; do
-	at 'AT+EFUN=1' 30
-	case "$(at 'AT+ESIMS?')" in *'+ESIMS: 1'*) break ;; esac
+	at 'AT+EFUN=1' 60
+	case "$(at 'AT+ESIMS?')" in *'+ESIMS: 1'*) sim_up && break ;; esac
 	sleep 2
 done
+at 'AT+CPIN?'
 exit 0

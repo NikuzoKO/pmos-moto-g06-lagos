@@ -18,7 +18,8 @@ ExecStart=/usr/bin/lagos-modem
 ExecStartPost=/bin/sh -c 'for i in $(seq 120); do grep -q "md1:4" /sys/kernel/ccci/boot && exit 0; sleep 0.5; done; exit 1'
 # SIM power-up and LTE initial-attach APN (lagos-modem-init)
 ExecStartPost=/usr/bin/lagos-modem-init
-TimeoutStartSec=90
+TimeoutStartSec=300
+TimeoutStopSec=15
 Restart=on-failure
 RestartSec=5
 
