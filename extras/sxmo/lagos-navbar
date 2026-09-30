@@ -1,0 +1,529 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: MIT
+# Android-style 3-button navigation bar for sxmo on sway, as a layer-shell
+# surface along the bottom edge (it reserves its height, so windows tile above
+# it). Works for every app, not only Android ones:
+#   back     sends Escape to the focused window (ATL maps an unconsumed Escape
+#            to Activity.onBackPressed; native apps close dialogs/menus with it)
+#   home     jumps to an empty workspace (the desktop); pressed again there it
+#            opens the sxmo app menu, which is the closest thing to a launcher
+#   recents  full-screen card list of open windows, most recent first; tap a
+#            card to switch to it, x to close it, "Clear all" closes them all
+# Started from ~/.config/services/lagos-navbar.service (superd).
+
+import json
+import math
+import os
+import subprocess
+
+import cairo
+import gi
+
+gi.require_version("Gtk", "3.0")
+gi.require_version("Gdk", "3.0")
+gi.require_version("GtkLayerShell", "0.1")
+from gi.repository import Gdk, GdkPixbuf, GLib, Gtk, GtkLayerShell, Pango  # noqa: E402
+
+# Logical pixels (sway scales them)
+BAR_HEIGHT = 40
+ICON_SIZE = 16
+RIPPLE_RADIUS = 20
+CARD_HEIGHT = 64
+CARD_RADIUS = 14
+CARD_SPACING = 10
+SIDE_MARGIN = 14
+APP_ICON_SIZE = 36
+HAPTIC_MS = 12
+RIPPLE_MS = 250
+
+# Rosé Pine, matching the desktop and the volume overlay
+BAR_COLOR = (0.098, 0.090, 0.141, 1.0)  # base
+ICON_COLOR = (0.878, 0.871, 0.957, 1.0)  # text
+RIPPLE_COLOR = (0.878, 0.871, 0.957, 0.18)
+SCRIM_COLOR = (0.098, 0.090, 0.141, 0.92)
+CARD_COLOR = (0.149, 0.137, 0.227, 1.0)  # surface
+CARD_PRESSED_COLOR = (0.251, 0.239, 0.322, 1.0)  # highlight med
+SUBTLE_COLOR = (0.565, 0.549, 0.667, 1.0)  # subtle
+ACCENT_COLOR = (0.769, 0.655, 0.906, 1.0)  # iris
+
+APP_DIRS = [
+    os.path.expanduser("~/.local/share/applications"),
+    os.path.expanduser("~/.local/share/flatpak/exports/share/applications"),
+    "/usr/local/share/applications",
+    "/usr/share/applications",
+]
+
+
+def run(*args):
+    subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+
+
+def haptic():
+    run("lagos-vibrate", str(HAPTIC_MS))
+
+
+def sway(command):
+    run("swaymsg", command)
+
+
+def sway_json(kind):
+    try:
+        return json.loads(subprocess.run(["swaymsg", "-r", "-t", kind], capture_output=True, text=True, timeout=3).stdout)
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        return None
+
+
+def rgba(context, color):
+    context.set_source_rgba(*color)
+
+
+def rounded_rectangle(context, x, y, width, height, radius):
+    radius = min(radius, width / 2, height / 2)
+    context.new_sub_path()
+    context.arc(x + width - radius, y + radius, radius, -math.pi / 2, 0)
+    context.arc(x + width - radius, y + height - radius, radius, 0, math.pi / 2)
+    context.arc(x + radius, y + height - radius, radius, math.pi / 2, math.pi)
+    context.arc(x + radius, y + radius, radius, math.pi, 3 * math.pi / 2)
+    context.close_path()
+
+
+# --- window list ------------------------------------------------------------
+
+def windows_most_recent_first():
+    """Views from the sway tree, walked in each container's focus order (MRU)."""
+    tree = sway_json("get_tree")
+    if not tree:
+        return []
+    found = []
+
+    def walk(node, workspace):
+        if node.get("type") == "workspace":
+            workspace = node.get("name")
+        children = {child["id"]: child for child in node.get("nodes", []) + node.get("floating_nodes", [])}
+        ordered = [children.pop(i) for i in node.get("focus", []) if i in children] + list(children.values())
+        if not ordered and node.get("type") in ("con", "floating_con") and node.get("pid"):
+            found.append({
+                "id": node["id"],
+                "app_id": node.get("app_id") or (node.get("window_properties") or {}).get("class") or "",
+                "title": node.get("name") or "",
+                "workspace": workspace,
+            })
+        for child in ordered:
+            walk(child, workspace)
+
+    walk(tree, None)
+    return found
+
+
+_desktop_cache = {}
+
+
+def desktop_entry(app_id):
+    """(name, icon) for an app_id from its .desktop file, if there is one."""
+    if app_id in _desktop_cache:
+        return _desktop_cache[app_id]
+    result = (None, None)
+    candidates = []
+    for directory in APP_DIRS:
+        try:
+            names = os.listdir(directory)
+        except OSError:
+            continue
+        for name in names:
+            if name.endswith(".desktop"):
+                candidates.append(os.path.join(directory, name))
+    lowered = app_id.lower()
+    # exact file name first, then StartupWMClass
+    candidates.sort(key=lambda path: os.path.basename(path)[:-8].lower() != lowered)
+    for path in candidates:
+        base = os.path.basename(path)[:-8].lower()
+        try:
+            with open(path, encoding="utf-8", errors="replace") as handle:
+                text = handle.read()
+        except OSError:
+            continue
+        fields = {}
+        in_entry = False
+        for line in text.splitlines():
+            if line.startswith("["):
+                in_entry = line.strip() == "[Desktop Entry]"
+            elif in_entry and "=" in line:
+                key, value = line.split("=", 1)
+                fields.setdefault(key.strip(), value.strip())
+        if base == lowered or fields.get("StartupWMClass", "").lower() == lowered:
+            result = (fields.get("Name"), fields.get("Icon"))
+            break
+    _desktop_cache[app_id] = result
+    return result
+
+
+def app_icon(icon_name, app_id):
+    theme = Gtk.IconTheme.get_default()
+    for name in (icon_name, app_id, app_id.lower(), "application-x-executable"):
+        if not name:
+            continue
+        try:
+            if os.path.isabs(name):
+                return GdkPixbuf.Pixbuf.new_from_file_at_size(name, APP_ICON_SIZE, APP_ICON_SIZE)
+            if theme.has_icon(name):
+                return theme.load_icon(name, APP_ICON_SIZE, Gtk.IconLookupFlags.FORCE_SIZE)
+        except GLib.Error:
+            continue
+    return None
+
+
+
+# --- widgets ----------------------------------------------------------------
+
+class Ripple:
+    """A press highlight that fades out, drawn behind a button's glyph."""
+
+    def __init__(self, widget):
+        self.widget = widget
+        self.start = None
+        self.held = False
+
+    def press(self):
+        self.held = True
+        self.start = None
+        self.widget.queue_draw()
+
+    def release(self):
+        self.held = False
+        self.start = GLib.get_monotonic_time()
+        self.widget.add_tick_callback(self._tick)
+
+    def _tick(self, widget, clock):
+        widget.queue_draw()
+        return self.alpha() > 0
+
+    def alpha(self):
+        if self.held:
+            return 1.0
+        if self.start is None:
+            return 0.0
+        progress = (GLib.get_monotonic_time() - self.start) / 1000 / RIPPLE_MS
+        return max(0.0, 1.0 - progress)
+
+
+class NavButton(Gtk.DrawingArea):
+    def __init__(self, glyph, on_tap):
+        super().__init__()
+        self.glyph = glyph
+        self.on_tap = on_tap
+        self.ripple = Ripple(self)
+        self.inside = False
+        self.set_hexpand(True)
+        self.add_events(Gdk.EventMask.BUTTON_PRESS_MASK | Gdk.EventMask.BUTTON_RELEASE_MASK
+                        | Gdk.EventMask.LEAVE_NOTIFY_MASK)
+        self.connect("draw", self.on_draw)
+        self.connect("button-press-event", self.on_press)
+        self.connect("button-release-event", self.on_release)
+
+    def on_press(self, widget, event):
+        if event.button != 1:
+            return False
+        self.inside = True
+        self.ripple.press()
+        haptic()
+        return True
+
+    def on_release(self, widget, event):
+        if event.button != 1:
+            return False
+        allocation = self.get_allocation()
+        inside = 0 <= event.x <= allocation.width and 0 <= event.y <= allocation.height
+        self.ripple.release()
+        if inside:
+            self.on_tap()
+        return True
+
+    def on_draw(self, widget, context):
+        width = self.get_allocated_width()
+        height = self.get_allocated_height()
+        cx, cy = width / 2, height / 2
+        alpha = self.ripple.alpha()
+        if alpha > 0:
+            context.set_source_rgba(*RIPPLE_COLOR[:3], RIPPLE_COLOR[3] * alpha)
+            context.arc(cx, cy, RIPPLE_RADIUS, 0, 2 * math.pi)
+            context.fill()
+        rgba(context, ICON_COLOR)
+        context.set_line_width(1.8)
+        context.set_line_join(cairo.LINE_JOIN_ROUND)
+        half = ICON_SIZE / 2
+        if self.glyph == "back":
+            context.move_to(cx + half * 0.75, cy - half)
+            context.line_to(cx - half * 0.85, cy)
+            context.line_to(cx + half * 0.75, cy + half)
+            context.close_path()
+            context.stroke()
+        elif self.glyph == "home":
+            context.arc(cx, cy, half, 0, 2 * math.pi)
+            context.stroke()
+        else:
+            rounded_rectangle(context, cx - half * 0.85, cy - half * 0.85, half * 1.7, half * 1.7, 3)
+            context.stroke()
+        return True
+
+
+class NavBar(Gtk.Window):
+    def __init__(self, recents):
+        super().__init__()
+        self.recents = recents
+        GtkLayerShell.init_for_window(self)
+        GtkLayerShell.set_layer(self, GtkLayerShell.Layer.TOP)
+        for edge in (GtkLayerShell.Edge.BOTTOM, GtkLayerShell.Edge.LEFT, GtkLayerShell.Edge.RIGHT):
+            GtkLayerShell.set_anchor(self, edge, True)
+        GtkLayerShell.auto_exclusive_zone_enable(self)
+        GtkLayerShell.set_keyboard_mode(self, GtkLayerShell.KeyboardMode.NONE)
+        GtkLayerShell.set_namespace(self, "lagos-navbar")
+        self.set_size_request(-1, BAR_HEIGHT)
+        self.set_app_paintable(True)
+        self.connect("draw", self.on_draw)
+
+        box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
+        box.set_homogeneous(True)
+        # Android's spacing: the three buttons sit in the middle ~70% of the width
+        box.pack_start(Gtk.Box(), True, True, 0)
+        for glyph, handler in (("back", self.back), ("home", self.home), ("recents", self.toggle_recents)):
+            box.pack_start(NavButton(glyph, handler), True, True, 0)
+        box.pack_start(Gtk.Box(), True, True, 0)
+        self.add(box)
+
+    def on_draw(self, widget, context):
+        rgba(context, BAR_COLOR)
+        context.paint()
+        return False
+
+    def back(self):
+        if self.recents.get_visible():
+            self.recents.dismiss()
+            return
+        run("wtype", "-k", "Escape")
+
+    def home(self):
+        self.recents.dismiss()
+        workspaces = sway_json("get_workspaces") or []
+        tree = sway_json("get_tree") or {}
+        occupied = set()
+
+        def walk(node, workspace):
+            if node.get("type") == "workspace":
+                workspace = node.get("num")
+            if node.get("pid") and workspace is not None:
+                occupied.add(workspace)
+            for child in node.get("nodes", []) + node.get("floating_nodes", []):
+                walk(child, workspace)
+
+        walk(tree, None)
+        focused = next((ws for ws in workspaces if ws.get("focused")), None)
+        if focused and focused.get("num") not in occupied:
+            run("sxmo_appmenu.sh")
+            return
+        number = 1
+        while number in occupied:
+            number += 1
+        sway(f"workspace number {number}")
+
+    def toggle_recents(self):
+        if self.recents.get_visible():
+            self.recents.dismiss()
+        else:
+            self.recents.present_list()
+
+
+class Card(Gtk.EventBox):
+    def __init__(self, window, recents):
+        super().__init__()
+        self.window = window
+        self.recents = recents
+        self.pressed = False
+        self.set_size_request(-1, CARD_HEIGHT)
+        self.set_visible_window(False)
+        self.connect("button-press-event", self.on_press)
+        self.connect("button-release-event", self.on_release)
+
+        name, icon_name = desktop_entry(window["app_id"])
+        name = name or window["app_id"] or "Window"
+        title = window["title"] if window["title"] and window["title"] != name else ""
+
+        row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        row.set_margin_start(14)
+        row.set_margin_end(4)
+        pixbuf = app_icon(icon_name, window["app_id"])
+        image = Gtk.Image.new_from_pixbuf(pixbuf) if pixbuf else Gtk.Image()
+        image.set_size_request(APP_ICON_SIZE, APP_ICON_SIZE)
+        row.pack_start(image, False, False, 0)
+
+        labels = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        labels.set_valign(Gtk.Align.CENTER)
+        name_label = Gtk.Label(xalign=0)
+        name_label.set_markup(f"<b>{GLib.markup_escape_text(name)}</b>")
+        name_label.set_ellipsize(Pango.EllipsizeMode.END)
+        labels.pack_start(name_label, False, False, 0)
+        subtitle = title
+        if window["workspace"]:
+            subtitle = f"{title}  ·  ws {window['workspace']}" if title else f"ws {window['workspace']}"
+        sub_label = Gtk.Label(label=subtitle, xalign=0)
+        sub_label.set_ellipsize(Pango.EllipsizeMode.END)
+        sub_label.get_style_context().add_class("subtitle")
+        labels.pack_start(sub_label, False, False, 0)
+        row.pack_start(labels, True, True, 0)
+
+        close = Gtk.Button(label="✕")
+        close.set_relief(Gtk.ReliefStyle.NONE)
+        close.set_size_request(CARD_HEIGHT - 8, CARD_HEIGHT - 8)
+        close.set_valign(Gtk.Align.CENTER)
+        close.get_style_context().add_class("close")
+        close.connect("clicked", self.on_close)
+        row.pack_end(close, False, False, 0)
+        self.add(row)
+        self.connect("draw", self.on_draw)
+
+    def on_draw(self, widget, context):
+        rounded_rectangle(context, 0, 0, self.get_allocated_width(), self.get_allocated_height(), CARD_RADIUS)
+        rgba(context, CARD_PRESSED_COLOR if self.pressed else CARD_COLOR)
+        context.fill()
+        return False
+
+    def on_press(self, widget, event):
+        if event.button == 1:
+            self.pressed = True
+            self.queue_draw()
+        return True
+
+    def on_release(self, widget, event):
+        if event.button != 1:
+            return True
+        self.pressed = False
+        self.queue_draw()
+        allocation = self.get_allocation()
+        if 0 <= event.x <= allocation.width and 0 <= event.y <= allocation.height:
+            haptic()
+            sway(f"[con_id={self.window['id']}] focus")
+            self.recents.dismiss()
+        return True
+
+    def on_close(self, button):
+        haptic()
+        sway(f"[con_id={self.window['id']}] kill")
+        self.recents.remove_card(self)
+
+
+class Recents(Gtk.Window):
+    def __init__(self):
+        super().__init__()
+        GtkLayerShell.init_for_window(self)
+        GtkLayerShell.set_layer(self, GtkLayerShell.Layer.OVERLAY)
+        for edge in (GtkLayerShell.Edge.TOP, GtkLayerShell.Edge.BOTTOM,
+                     GtkLayerShell.Edge.LEFT, GtkLayerShell.Edge.RIGHT):
+            GtkLayerShell.set_anchor(self, edge, True)
+        # exclusive zone 0: stays above the nav bar's reserved strip, so the bar remains usable
+        GtkLayerShell.set_keyboard_mode(self, GtkLayerShell.KeyboardMode.NONE)
+        GtkLayerShell.set_namespace(self, "lagos-recents")
+        self.set_app_paintable(True)
+        self.connect("draw", self.on_draw)
+
+        outer = Gtk.EventBox()
+        outer.set_visible_window(False)
+        outer.connect("button-release-event", lambda *_: self.dismiss() or True)
+        self.add(outer)
+
+        layout = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        outer.add(layout)
+        header = Gtk.Label(label="Recent", xalign=0)
+        header.get_style_context().add_class("header")
+        header.set_margin_start(SIDE_MARGIN + 4)
+        header.set_margin_top(18)
+        header.set_margin_bottom(10)
+        layout.pack_start(header, False, False, 0)
+
+        self.scroller = Gtk.ScrolledWindow()
+        self.scroller.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        self.scroller.set_kinetic_scrolling(True)
+        layout.pack_start(self.scroller, True, True, 0)
+        self.list = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=CARD_SPACING)
+        self.list.set_margin_start(SIDE_MARGIN)
+        self.list.set_margin_end(SIDE_MARGIN)
+        self.list.set_valign(Gtk.Align.START)
+        self.scroller.add(self.list)
+
+        self.empty = Gtk.Label(label="No recent items")
+        self.empty.get_style_context().add_class("subtitle")
+        self.empty.set_vexpand(True)
+        layout.pack_start(self.empty, True, True, 0)
+
+        self.clear = Gtk.Button(label="Clear all")
+        self.clear.get_style_context().add_class("clear")
+        self.clear.set_halign(Gtk.Align.CENTER)
+        self.clear.set_margin_top(10)
+        self.clear.set_margin_bottom(14)
+        self.clear.connect("clicked", self.on_clear)
+        layout.pack_start(self.clear, False, False, 0)
+
+    def on_draw(self, widget, context):
+        context.set_operator(cairo.OPERATOR_SOURCE)
+        rgba(context, SCRIM_COLOR)
+        context.paint()
+        context.set_operator(cairo.OPERATOR_OVER)
+        return False
+
+    def present_list(self):
+        for child in self.list.get_children():
+            child.destroy()
+        for window in windows_most_recent_first():
+            self.list.pack_start(Card(window, self), False, False, 0)
+        self.show_all()
+        self.update_empty()
+        self.scroller.get_vadjustment().set_value(0)
+
+    def update_empty(self):
+        has_cards = bool(self.list.get_children())
+        self.scroller.set_visible(has_cards)
+        self.clear.set_visible(has_cards)
+        self.empty.set_visible(not has_cards)
+
+    def remove_card(self, card):
+        card.destroy()
+        self.update_empty()
+
+    def on_clear(self, button):
+        haptic()
+        for card in self.list.get_children():
+            sway(f"[con_id={card.window['id']}] kill")
+        self.dismiss()
+
+    def dismiss(self):
+        if self.get_visible():
+            self.hide()
+
+
+CSS = f"""
+label {{ color: rgba({int(ICON_COLOR[0]*255)},{int(ICON_COLOR[1]*255)},{int(ICON_COLOR[2]*255)},1); }}
+label.header {{ font-size: 20px; font-weight: bold; }}
+label.subtitle {{ color: rgba({int(SUBTLE_COLOR[0]*255)},{int(SUBTLE_COLOR[1]*255)},{int(SUBTLE_COLOR[2]*255)},1); font-size: 12px; }}
+button.close, button.close label {{ background: none; border: none; box-shadow: none; font-size: 16px;
+    color: rgba({int(SUBTLE_COLOR[0]*255)},{int(SUBTLE_COLOR[1]*255)},{int(SUBTLE_COLOR[2]*255)},1); }}
+button.clear {{ background: rgba({int(CARD_COLOR[0]*255)},{int(CARD_COLOR[1]*255)},{int(CARD_COLOR[2]*255)},1);
+    border: none; box-shadow: none; border-radius: 18px; padding: 8px 22px; }}
+button.clear label {{ color: rgba({int(ACCENT_COLOR[0]*255)},{int(ACCENT_COLOR[1]*255)},{int(ACCENT_COLOR[2]*255)},1); font-weight: bold; }}
+"""
+
+
+def main():
+    provider = Gtk.CssProvider()
+    provider.load_from_data(CSS.encode())
+    Gtk.StyleContext.add_provider_for_screen(Gdk.Screen.get_default(), provider,
+                                             Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+    recents = Recents()
+    screen = recents.get_screen()
+    visual = screen.get_rgba_visual()
+    if visual:
+        recents.set_visual(visual)
+    bar = NavBar(recents)
+    bar.show_all()
+    Gtk.main()
+
+
+if __name__ == "__main__":
+    main()

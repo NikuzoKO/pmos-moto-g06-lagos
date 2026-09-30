@@ -1,0 +1,7 @@
+[Unit]
+Description=Android-style navigation bar (back/home/recents)
+
+[Service]
+Type=simple
+Restart=always
+ExecStart=/home/nikuzo/.local/bin/lagos-navbar
