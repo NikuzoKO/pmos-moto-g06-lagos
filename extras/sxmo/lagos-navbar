@@ -9,11 +9,15 @@
 #            opens the sxmo app menu, which is the closest thing to a launcher
 #   recents  full-screen card list of open windows, most recent first; tap a
 #            card to switch to it, x to close it, "Clear all" closes them all
+#   keyboard (bottom right, only while wvkbd is up) hides the keyboard; it is
+#            seen from sway's usable area shrinking (polled over the IPC socket)
 # Started from ~/.config/services/lagos-navbar.service (superd).
 
 import json
 import math
 import os
+import socket
+import struct
 import subprocess
 
 import cairo
@@ -34,6 +38,7 @@ CARD_SPACING = 10
 SIDE_MARGIN = 14
 APP_ICON_SIZE = 36
 HAPTIC_MS = 12
+KEYBOARD_POLL_MS = 300
 RIPPLE_MS = 250
 
 # Rosé Pine, matching the desktop and the volume overlay
@@ -71,6 +76,45 @@ def sway_json(kind):
         return json.loads(subprocess.run(["swaymsg", "-r", "-t", kind], capture_output=True, text=True, timeout=3).stdout)
     except (OSError, ValueError, subprocess.TimeoutExpired):
         return None
+
+
+class SwayIpc:
+    """Minimal sway IPC client on a kept-open socket (polling without forking swaymsg)."""
+
+    MAGIC = b"i3-ipc"
+
+    def __init__(self):
+        self.sock = None
+
+    def request(self, kind):
+        for _ in range(2):
+            try:
+                if self.sock is None:
+                    self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                    self.sock.connect(os.environ["SWAYSOCK"])
+                self.sock.sendall(self.MAGIC + struct.pack("<II", 0, kind))
+                header = self._read(14)
+                length, _ = struct.unpack("<II", header[6:])
+                return json.loads(self._read(length))
+            except (OSError, KeyError, ValueError):
+                if self.sock:
+                    self.sock.close()
+                self.sock = None
+        return None
+
+    def _read(self, size):
+        data = b""
+        while len(data) < size:
+            chunk = self.sock.recv(size - len(data))
+            if not chunk:
+                raise OSError("sway IPC closed")
+            data += chunk
+        return data
+
+
+GET_WORKSPACES = 1
+GET_OUTPUTS = 3
+SXMO_STATE = os.path.join(os.environ.get("XDG_RUNTIME_DIR", "/run/user/%d" % os.getuid()), "sxmo.state")
 
 
 def rgba(context, color):
@@ -213,6 +257,7 @@ class NavButton(Gtk.DrawingArea):
         self.on_tap = on_tap
         self.ripple = Ripple(self)
         self.inside = False
+        self.enabled = True
         self.set_hexpand(True)
         self.add_events(Gdk.EventMask.BUTTON_PRESS_MASK | Gdk.EventMask.BUTTON_RELEASE_MASK
                         | Gdk.EventMask.LEAVE_NOTIFY_MASK)
@@ -220,8 +265,13 @@ class NavButton(Gtk.DrawingArea):
         self.connect("button-press-event", self.on_press)
         self.connect("button-release-event", self.on_release)
 
+    def set_enabled(self, enabled):
+        if enabled != self.enabled:
+            self.enabled = enabled
+            self.queue_draw()
+
     def on_press(self, widget, event):
-        if event.button != 1:
+        if event.button != 1 or not self.enabled:
             return False
         self.inside = True
         self.ripple.press()
@@ -229,7 +279,7 @@ class NavButton(Gtk.DrawingArea):
         return True
 
     def on_release(self, widget, event):
-        if event.button != 1:
+        if event.button != 1 or not self.enabled:
             return False
         allocation = self.get_allocation()
         inside = 0 <= event.x <= allocation.width and 0 <= event.y <= allocation.height
@@ -242,6 +292,8 @@ class NavButton(Gtk.DrawingArea):
         width = self.get_allocated_width()
         height = self.get_allocated_height()
         cx, cy = width / 2, height / 2
+        if not self.enabled:
+            return True
         alpha = self.ripple.alpha()
         if alpha > 0:
             context.set_source_rgba(*RIPPLE_COLOR[:3], RIPPLE_COLOR[3] * alpha)
@@ -259,6 +311,25 @@ class NavButton(Gtk.DrawingArea):
             context.stroke()
         elif self.glyph == "home":
             context.arc(cx, cy, half, 0, 2 * math.pi)
+            context.stroke()
+        elif self.glyph == "keyboard":
+            # a keyboard with a down chevron under it, like Android's IME switcher slot
+            top = cy - half
+            rounded_rectangle(context, cx - half, top, half * 2, half * 1.15, 2)
+            context.stroke()
+            context.set_line_width(1.4)
+            for row, count in ((0.35, 4), (0.75, 4)):
+                y = top + half * 1.15 * row
+                for i in range(count):
+                    x = cx - half * 0.6 + i * half * 0.4
+                    context.move_to(x, y)
+                    context.line_to(x + 0.01, y)
+            context.set_line_cap(cairo.LINE_CAP_ROUND)
+            context.set_line_width(1.8)
+            context.stroke()
+            context.move_to(cx - half * 0.45, cy + half * 0.55)
+            context.line_to(cx, cy + half * 0.95)
+            context.line_to(cx + half * 0.45, cy + half * 0.55)
             context.stroke()
         else:
             rounded_rectangle(context, cx - half * 0.85, cy - half * 0.85, half * 1.7, half * 1.7, 3)
@@ -288,8 +359,40 @@ class NavBar(Gtk.Window):
         box.pack_start(Gtk.Box(), True, True, 0)
         for glyph, handler in (("back", self.back), ("home", self.home), ("recents", self.toggle_recents)):
             box.pack_start(NavButton(glyph, handler), True, True, 0)
-        box.pack_start(Gtk.Box(), True, True, 0)
+        self.keyboard_button = NavButton("keyboard", self.hide_keyboard)
+        self.keyboard_button.set_enabled(False)
+        box.pack_start(self.keyboard_button, True, True, 0)
         self.add(box)
+
+        self.ipc = SwayIpc()
+        GLib.timeout_add(KEYBOARD_POLL_MS, self.poll_keyboard)
+
+    def keyboard_visible(self):
+        """wvkbd reserves an exclusive zone, so the focused workspace ends above our bar."""
+        workspaces = self.ipc.request(GET_WORKSPACES) or []
+        outputs = self.ipc.request(GET_OUTPUTS) or []
+        focused = next((ws for ws in workspaces if ws.get("focused")), None)
+        if not focused:
+            return False
+        output = next((out for out in outputs if out.get("name") == focused.get("output")), None)
+        if not output:
+            return False
+        bottom = focused["rect"]["y"] + focused["rect"]["height"]
+        return bottom < output["rect"]["y"] + output["rect"]["height"] - BAR_HEIGHT - 20
+
+    def poll_keyboard(self):
+        try:
+            with open(SXMO_STATE) as handle:
+                if handle.read().strip() == "screenoff":
+                    return True
+        except OSError:
+            pass
+        self.keyboard_button.set_enabled(self.keyboard_visible())
+        return True
+
+    def hide_keyboard(self):
+        run("sxmo_keyboard.sh", "close")
+        self.keyboard_button.set_enabled(False)
 
     def on_draw(self, widget, context):
         rgba(context, BAR_COLOR)

@@ -459,11 +459,7 @@ case "$ACTION" in
 		exit 0
 		;;
 	"downbottomedge")
-		if [ -n "$SXMO_NO_VIRTUAL_KEYBOARD" ]; then
-			sxmo_killwindow.sh
-		else
-			sxmo_keyboard.sh close
-		fi
+		# The keyboard hides from its button on the nav bar (bottom right)
 		exit 0
 		;;
 	"downtopedge")
