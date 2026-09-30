@@ -1,0 +1,7 @@
+[Unit]
+Description=WhatsApp (Android Translation Layer) in the background, for notifications
+
+[Service]
+Type=simple
+Restart=always
+ExecStart=/home/nikuzo/.local/bin/atl-whatsapp --hidden

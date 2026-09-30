@@ -2,16 +2,51 @@
 # Run an Android app under Android Translation Layer on its own sway workspace,
 # like an Android app switcher: one app per workspace. If the app already has a
 # window, just focus it.
-# usage: atl-run <app_id> <apk>   (app_id = the package name, e.g. com.whatsapp)
+# usage: atl-run [--hidden] <app_id> <apk>   (app_id = the package name, e.g. com.whatsapp)
+#
+# With ATL_BACKGROUND=1 (set by the per-app launcher) closing the window only
+# hides it: the app keeps running in the background (connections, alarms,
+# notifications) and the next atl-run brings the window back (SIGUSR1).
+# --hidden starts it that way without showing a window (autostart).
+hidden=
+[ "$1" = --hidden ] && { hidden=1; shift; }
 app_id=$1
 apk=$2
-[ -n "$app_id" ] && [ -f "$apk" ] || { echo "usage: atl-run <app_id> <apk>" >&2; exit 1; }
+[ -n "$app_id" ] && [ -f "$apk" ] || { echo "usage: atl-run [--hidden] <app_id> <apk>" >&2; exit 1; }
 
-[ -S "$SWAYSOCK" ] || SWAYSOCK=$(ls /run/user/"$(id -u)"/sway-ipc.*.sock 2>/dev/null | head -1)
+[ -S "$SWAYSOCK" ] || SWAYSOCK=/run/user/$(id -u)/sway-ipc.$(id -u).$(pidof sway | cut -d' ' -f1).sock
 export SWAYSOCK
 
-if swaymsg -t get_tree | grep -q "\"app_id\": \"$app_id\""; then
-	swaymsg "[app_id=\"^$app_id\$\"] focus" >/dev/null
+pidfile=$XDG_RUNTIME_DIR/atl/$app_id.pid
+running() { [ -f "$pidfile" ] && kill -0 "$(cat "$pidfile")" 2>/dev/null; }
+has_window() { swaymsg -t get_tree | grep -q "\"app_id\": \"$app_id\""; }
+
+# The window maps late (ART start-up) or comes back from hiding wherever focus
+# is by then: wait for it, then move it to the first workspace number with no
+# windows and follow it.
+place_window() {
+	i=0
+	while [ $i -lt 600 ] && running; do
+		if has_window; then
+			used=$(swaymsg -t get_workspaces | grep -o '"num": [0-9]*' | grep -o '[0-9]*')
+			n=1
+			while echo "$used" | grep -qx "$n"; do n=$((n + 1)); done
+			swaymsg "[app_id=\"^$app_id\$\"] move container to workspace number $n, workspace number $n" >/dev/null
+			return
+		fi
+		sleep 0.5
+		i=$((i + 1))
+	done
+}
+
+if running; then
+	[ -n "$hidden" ] && exit 0
+	if has_window; then
+		swaymsg "[app_id=\"^$app_id\$\"] focus" >/dev/null
+	else
+		kill -USR1 "$(cat "$pidfile")"
+		place_window
+	fi
 	exit 0
 fi
 
@@ -20,23 +55,21 @@ export LD_PRELOAD=$HOME/.local/lib/atl/libatl-bionic-extra.so
 export ATL_DISABLE_WINDOW_DECORATIONS=1
 # no GPU here: GTK's GL renderer on software GL loses its glyph atlas (magenta text)
 export GSK_RENDERER=cairo
+[ -n "$hidden" ] && export ATL_BACKGROUND=1 ATL_START_HIDDEN=1
+# kernel wakelocks for PowerManager.WakeLock need CAP_BLOCK_SUSPEND
+wrap=
+[ -x /usr/local/bin/atl-wakelock-exec ] && wrap=/usr/local/bin/atl-wakelock-exec
 log=$HOME/.cache/atl/$app_id.log
-mkdir -p "${log%/*}"
-/usr/local/bin/android-translation-layer "$apk" > "$log" 2>&1 &
+mkdir -p "${log%/*}" "${pidfile%/*}"
+# keep the last three runs (a restarted app would otherwise overwrite the crash log)
+[ -f "$log.prev2" ] && mv "$log.prev2" "$log.prev3"
+[ -f "$log.prev" ] && mv "$log.prev" "$log.prev2"
+[ -f "$log" ] && mv "$log" "$log.prev"
+# the package name as GApplication id: Wayland app_id (also after hide/show), D-Bus name, notification desktop-entry
+$wrap /usr/local/bin/android-translation-layer --gapplication-app-id "$app_id" "$apk" > "$log" 2>&1 &
 pid=$!
+echo $pid > "$pidfile"
 
-# The window maps late (ART start-up), wherever focus is by then: wait for it,
-# then move it to the first workspace number with no windows and follow it.
-i=0
-while [ $i -lt 600 ] && kill -0 $pid 2>/dev/null; do
-	if swaymsg -t get_tree | grep -q "\"app_id\": \"$app_id\""; then
-		used=$(swaymsg -t get_workspaces | grep -o '"num": [0-9]*' | grep -o '[0-9]*')
-		n=1
-		while echo "$used" | grep -qx "$n"; do n=$((n + 1)); done
-		swaymsg "[app_id=\"^$app_id\$\"] move container to workspace number $n, workspace number $n" >/dev/null
-		break
-	fi
-	sleep 0.5
-	i=$((i + 1))
-done
+[ -z "$hidden" ] && place_window
 wait $pid
+rm -f "$pidfile" "$XDG_RUNTIME_DIR/atl-alarms/$pid"

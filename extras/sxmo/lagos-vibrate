@@ -1,0 +1,16 @@
+#!/bin/sh
+# lagos-vibrate [ms ...]: buzz the vibrator for each duration, 150 ms apart
+# (default: 200 200). The Moto G06 vibrator is an LED-class device
+# (regulator-vibrator), not an input force-feedback device, so sxmo_vibrate
+# can't drive it; its brightness file is writable by the video group.
+led=/sys/class/leds/vibrator/brightness
+[ -w "$led" ] || exit 0
+[ $# -eq 0 ] && set -- 200 200
+first=1
+for ms in "$@"; do
+	[ -n "$first" ] || sleep 0.15
+	first=
+	echo 255 > "$led"
+	sleep "$(awk "BEGIN { print $ms / 1000 }")"
+	echo 0 > "$led"
+done

@@ -1,4 +1,5 @@
 #!/bin/sh
+# configversion: f1282bb39c782471bb788ccf8df0bb76
 # Stock app list plus Android apps run through Android Translation Layer,
 # slotted in alphabetically.
 . sxmo_hook_icons.sh

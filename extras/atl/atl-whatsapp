@@ -1,6 +1,12 @@
 #!/bin/sh
 # WhatsApp under Android Translation Layer, on its own workspace. Report the
 # telephony feature so WhatsApp registers as a phone, not a companion tablet.
+# It stays running in the background when its window is closed, so messages
+# keep arriving (atl-whatsapp --hidden = start in the background, superd
+# service atl-whatsapp).
 export ATL_HAS_TELEPHONY=1
 export ATL_UGLY_ENABLE_CONTACTS=1
-exec "$HOME/.local/bin/atl-run" com.whatsapp "$HOME/apks/whatsapp.apk"
+export ATL_BACKGROUND=1
+# WhatsApp's native code makes JNI calls with an exception pending; CheckJNI would abort
+export ATL_CHECKJNI=0
+exec "$HOME/.local/bin/atl-run" "$@" com.whatsapp "$HOME/apks/whatsapp.apk"

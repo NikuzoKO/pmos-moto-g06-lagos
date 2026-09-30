@@ -1,0 +1,21 @@
+#!/bin/sh
+# dunst script for notifications from Android apps (Android Translation Layer,
+# see dunstrc.d/60-android-apps.conf): sound + buzz like sxmo_hook_sms.sh,
+# honouring sxmo's .busy (silent until), .noring and .novibrate flags. Runs
+# again when an app updates a notification (WhatsApp does so for every new
+# message in a chat).
+cfg="${XDG_CONFIG_HOME:-$HOME/.config}/sxmo"
+if [ -f "$cfg/.busy" ]; then
+	end="$(cat "$cfg/.busy")"
+	if [ -z "$end" ] || [ "$(date +%s)" -lt "$end" ]; then
+		exit 0
+	fi
+fi
+if [ ! -f "$cfg/.noring" ]; then
+	sound="${SXMO_TEXTSOUND:-/usr/share/sxmo/notify.ogg}"
+	mpv --no-resume-playback --quiet --no-video --audio-device=pipewire/lagos-notify "$sound" >/dev/null 2>&1 &
+fi
+if [ ! -f "$cfg/.novibrate" ]; then
+	"$HOME/.local/bin/lagos-vibrate" 200 200 &
+fi
+wait
