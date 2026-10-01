@@ -65,6 +65,7 @@ source="
 	79-lagos-flashlight.rules
 	lagos-flashlight.service
 	lagos-cpufreq.service
+	lagos-journald.conf
 	sxmo-deviceprofile-lagos.sh
 	"
 options="!archcheck !check"
@@ -139,6 +140,7 @@ package() {
 	install -Dm644 "$srcdir"/79-lagos-flashlight.rules "$pkgdir"/usr/lib/udev/rules.d/79-lagos-flashlight.rules
 	install -Dm644 "$srcdir"/lagos-flashlight.service "$pkgdir"/usr/lib/systemd/system/lagos-flashlight.service
 	install -Dm644 "$srcdir"/lagos-cpufreq.service "$pkgdir"/usr/lib/systemd/system/lagos-cpufreq.service
+	install -Dm644 "$srcdir"/lagos-journald.conf "$pkgdir"/usr/lib/systemd/journald.conf.d/lagos-size.conf
 
 	# sxmo finds it by the first DT compatible; abuild won't take a comma in
 	# a source file name
@@ -197,5 +199,6 @@ e21c457032185268f50f6350942df7c59cee9b7398c33fa314d630261cc8a3aa4a310cf1e0b4c5d5
 e6c6169db65c2e4550b0ab49733d45f5360cde9bdbc519f412f920af114b42032c4bbbe6fc11a31c297b0d02c11a1682ba6e20ac82af34f54bdd74e671d67c60  79-lagos-flashlight.rules
 1189444d0341767d6ae34a7388c61d1f49de7078f8448cdff906365706a42be8b2cf19444fcb97b943344d121685ac24d72592594ad01703d0c8217b507ca163  lagos-flashlight.service
 dec477d2752f30b6741242d518509fe5c25cb0b697bf0f07ab50356a8a179cba22ac47dd9ce455c98bca41ea456ed4705aa8533842d7523a4181caf0544a7537  lagos-cpufreq.service
+4a19af48dadb25fb3ed074d0eeecfc4f407e1c5e086aed59f8a46392743490f5044c91163ba42858dd6842704646345b2124d4c7b00c5af8709c28b74dcb4b07  lagos-journald.conf
 24fe048f20542c2561a89be82474a89c1db34a38db556e63f794085bc36bf3ea0745c7fcc6cdb4f05fd408851416105cf6463818b0705e4f73f197ec9cc9c11f  sxmo-deviceprofile-lagos.sh
 "
