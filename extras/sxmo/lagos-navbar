@@ -94,11 +94,48 @@ def sway_json(kind):
         return None
 
 
+def give_own_workspace(con_id):
+    """Android-style: one tiled window per workspace. If the window shares its
+    workspace with another tiled window, move it to the lowest empty one."""
+    tree = sway_json("get_tree")
+    if not tree:
+        return
+    occupied = set()
+    home = None
+    tiled = {}
+
+    def walk(node, workspace, floating):
+        if node.get("type") == "workspace":
+            workspace = node.get("name")
+        if not node.get("nodes") and not node.get("floating_nodes") and node.get("pid"):
+            occupied.add(workspace)
+            if not floating:
+                tiled[workspace] = tiled.get(workspace, 0) + 1
+            if node.get("id") == con_id:
+                nonlocal home
+                home = workspace
+        for child in node.get("nodes", []):
+            walk(child, workspace, floating)
+        for child in node.get("floating_nodes", []):
+            walk(child, workspace, True)
+
+    walk(tree, None, False)
+    if home in (None, SCRATCHPAD) or tiled.get(home, 0) < 2:
+        return
+    number = 1
+    while str(number) in occupied:
+        number += 1
+    criteria = f"[con_id={con_id}]"
+    sway(f"{criteria} move container to workspace number {number}; workspace number {number}; {criteria} focus")
+
+
 class RetileWatcher:
     """Follows sway's window events. Any way a minimized window comes back
     (recents, a notification, relaunching the app, sxmo) pulls it out of the
     scratchpad floating and focuses it; if home had marked it as tiled, tile it
-    again there. Restarts swaymsg if it exits (sway restarted)."""
+    again there. New tiled windows and re-tiled ones get a workspace of their
+    own instead of splitting the screen. Restarts swaymsg if it exits (sway
+    restarted)."""
 
     def __init__(self):
         self.start()
@@ -127,9 +164,12 @@ class RetileWatcher:
         except ValueError:
             return True
         container = event.get("container") or {}
-        if (event.get("change") == "focus" and container.get("type") == "floating_con"
+        change = event.get("change")
+        if (change == "focus" and container.get("type") == "floating_con"
                 and TILED_MARK in (container.get("marks") or [])):
             GLib.timeout_add(RETILE_RETRY_MS, self.retile, container["id"], RETILE_TRIES)
+        elif change == "new" and container.get("type") == "con":
+            give_own_workspace(container["id"])
         return True
 
     def retile(self, con_id, tries):
@@ -144,6 +184,8 @@ class RetileWatcher:
             done = False
         if done or tries <= 1:
             sway(f"{criteria} unmark {TILED_MARK}")
+            if done:
+                give_own_workspace(con_id)
         else:
             GLib.timeout_add(RETILE_RETRY_MS, self.retile, con_id, tries - 1)
         return False
