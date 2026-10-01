@@ -6,8 +6,8 @@
 #   back     sends Escape to the focused window (ATL maps an unconsumed Escape
 #            to Activity.onBackPressed; native apps close dialogs/menus with it)
 #   home     minimizes every window (sway has no minimize: they go to the
-#            scratchpad, tiled ones marked so they tile again however they
-#            come back (RetileWatcher);
+#            scratchpad; they tile again however they come back
+#            (RetileWatcher), except floating ones, which home marks);
 #            pressed again on the empty desktop it opens the sxmo app menu,
 #            which is the closest thing to a launcher
 #   recents  full-screen card list of open windows, most recent first,
@@ -46,7 +46,7 @@ ICON_SIZE = 16
 RIPPLE_RADIUS = 20
 CARD_HEIGHT = 64
 SCRATCHPAD = "__i3_scratch"
-TILED_MARK = "_lagos_tiled"  # sway never draws marks that start with "_"
+FLOATING_MARK = "_lagos_floating"  # sway never draws marks that start with "_"
 RETILE_RETRY_MS = 80
 RETILE_TRIES = 10
 CARD_RADIUS = 14
@@ -132,8 +132,8 @@ def give_own_workspace(con_id):
 class RetileWatcher:
     """Follows sway's window events. Any way a minimized window comes back
     (recents, a notification, relaunching the app, sxmo) pulls it out of the
-    scratchpad floating and focuses it; if home had marked it as tiled, tile it
-    again there. New tiled windows and re-tiled ones get a workspace of their
+    scratchpad floating and focuses it; tile it again there unless home marked
+    it as floating. New tiled windows and re-tiled ones get a workspace of their
     own instead of splitting the screen. Restarts swaymsg if it exits (sway
     restarted)."""
 
@@ -166,8 +166,11 @@ class RetileWatcher:
         container = event.get("container") or {}
         change = event.get("change")
         if (change == "focus" and container.get("type") == "floating_con"
-                and TILED_MARK in (container.get("marks") or [])):
-            GLib.timeout_add(RETILE_RETRY_MS, self.retile, container["id"], RETILE_TRIES)
+                and container.get("scratchpad_state", "none") != "none"):
+            if FLOATING_MARK in (container.get("marks") or []):
+                sway(f"[con_id={container['id']}] unmark {FLOATING_MARK}")
+            else:
+                GLib.timeout_add(RETILE_RETRY_MS, self.retile, container["id"], RETILE_TRIES)
         elif change == "new" and container.get("type") == "con":
             give_own_workspace(container["id"])
         return True
@@ -182,11 +185,9 @@ class RetileWatcher:
             done = all(r.get("success") for r in reply)
         except (OSError, ValueError, subprocess.TimeoutExpired):
             done = False
-        if done or tries <= 1:
-            sway(f"{criteria} unmark {TILED_MARK}")
-            if done:
-                give_own_workspace(con_id)
-        else:
+        if done:
+            give_own_workspace(con_id)
+        elif tries > 1:
             GLib.timeout_add(RETILE_RETRY_MS, self.retile, con_id, tries - 1)
         return False
 
@@ -545,8 +546,8 @@ class NavBar(Gtk.Window):
         commands = []
         for window in shown:
             criteria = f"[con_id={window['id']}]"
-            if not window["floating"]:
-                commands.append(f"{criteria} mark --add {TILED_MARK}")
+            if window["floating"]:
+                commands.append(f"{criteria} mark --add {FLOATING_MARK}")
             commands.append(f"{criteria} move scratchpad")
         sway("; ".join(commands))
 
