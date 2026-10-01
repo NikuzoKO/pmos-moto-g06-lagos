@@ -19,7 +19,8 @@
 #   history unseen); dismissed, app-closed or history-removed ones go away.
 #
 # The notification shade lives here too (it shares the notification list):
-# quick toggles fixed at the top (mobile data, wifi, bluetooth, flashlight),
+# quick toggles fixed at the top (mobile data, wifi, bluetooth, flashlight)
+# and the brightness slider (remembered across restarts),
 # the notifications under them. SIGUSR1 toggles it, SIGUSR2 closes it
 # (lagos-shade sends them; sxmo's first swipe down from the top runs it).
 # Started from ~/.config/services/lagos-statusbar.service (superd).
@@ -96,6 +97,10 @@ TILE_SIZE = 54
 CARD_RADIUS = 22
 CARD_PADDING = 14
 FLASHLIGHT = "/sys/class/flashlight_core/flashlight/flashlight_torch"  # "0 0 0 1" = on
+BACKLIGHT = "/sys/class/leds/lcd-backlight"  # LED class, group video writable
+BRIGHTNESS_STATE = os.path.join(os.environ.get("XDG_STATE_HOME") or os.path.expanduser("~/.local/state"),
+                                "lagos-brightness")  # last slider value, restored at start
+BRIGHTNESS_MIN = 3  # percent: the slider never blacks the panel out
 SURFACE_COLOR = (0.149, 0.137, 0.227, 1.0)  # surface
 ACCENT_COLOR = (0.769, 0.655, 0.906, 1.0)  # iris
 SCRIM_COLOR = (0.098, 0.090, 0.141, 0.96)  # base
@@ -105,6 +110,7 @@ GLYPH_WIFI_OFF = "\U000f05aa"
 GLYPH_BLUETOOTH = "\U000f00af"
 GLYPH_FLASHLIGHT = "\U000f0244"
 GLYPH_CLOSE = "\U000f0156"
+GLYPH_BRIGHTNESS = "\U000f00e0"
 
 RUNTIME = os.environ.get("XDG_RUNTIME_DIR", "/run/user/%d" % os.getuid())
 PIDFILE = os.path.join(RUNTIME, "lagos-statusbar.pid")
@@ -390,7 +396,57 @@ SHADE_CSS = """
 .shade button { background: none; border: none; box-shadow: none; padding: 0; min-height: 0; min-width: 0; }
 .shade button.clear label { color: %(accent)s; font-weight: bold; font-size: 12px; }
 .shade button.dismiss label { color: %(subtle)s; font-size: 15px; }
-""" % {"text": rgb_css(TEXT_COLOR), "subtle": rgb_css(SUBTLE_COLOR), "accent": rgb_css(ACCENT_COLOR)}
+.shade .brightness-glyph { font-size: 18px; color: %(subtle)s; }
+.shade scale trough { background: %(surface)s; border: none; border-radius: 12px; min-height: 24px; }
+.shade scale highlight { background: %(accent)s; border-radius: 12px; min-height: 24px; }
+.shade scale slider { background: %(text)s; border: none; box-shadow: none; min-width: 24px; min-height: 24px;
+    margin: 0; border-radius: 12px; }
+""" % {"text": rgb_css(TEXT_COLOR), "subtle": rgb_css(SUBTLE_COLOR), "accent": rgb_css(ACCENT_COLOR),
+       "surface": rgb_css(SURFACE_COLOR)}
+
+
+# Backlight levels go through a square curve: the eye resolves the low end
+# far better than the high end, so a linear slider would be all "bright".
+def backlight_max():
+    try:
+        with open(os.path.join(BACKLIGHT, "max_brightness")) as handle:
+            return max(1, int(handle.read()))
+    except (OSError, ValueError):
+        return 255
+
+
+def get_brightness_percent():
+    try:
+        with open(os.path.join(BACKLIGHT, "brightness")) as handle:
+            raw = int(handle.read())
+    except (OSError, ValueError):
+        return 100.0
+    return max(BRIGHTNESS_MIN, min(100.0, math.sqrt(raw / backlight_max()) * 100))
+
+
+def set_brightness_percent(percent, remember=True):
+    percent = max(BRIGHTNESS_MIN, min(100.0, percent))
+    raw = max(1, round(backlight_max() * (percent / 100) ** 2))
+    try:
+        with open(os.path.join(BACKLIGHT, "brightness"), "w") as handle:
+            handle.write(str(raw))
+    except OSError:
+        return
+    if remember:
+        try:
+            os.makedirs(os.path.dirname(BRIGHTNESS_STATE), exist_ok=True)
+            with open(BRIGHTNESS_STATE, "w") as handle:
+                handle.write("%.1f\n" % percent)
+        except OSError:
+            pass
+
+
+def restore_brightness():
+    try:
+        with open(BRIGHTNESS_STATE) as handle:
+            set_brightness_percent(float(handle.read()), remember=False)
+    except (OSError, ValueError):
+        pass
 
 
 def run_async(argv, done=None):
@@ -632,6 +688,21 @@ class Shade(Gtk.Window):
             tiles.pack_start(tile, True, True, 0)
         layout.pack_start(tiles, False, False, 0)
 
+        brightness = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        brightness.set_margin_top(14)
+        brightness.set_margin_start(6)
+        brightness.set_margin_end(6)
+        glyph = Gtk.Label(label=GLYPH_BRIGHTNESS)
+        glyph.get_style_context().add_class("brightness-glyph")
+        brightness.pack_start(glyph, False, False, 0)
+        self.brightness = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, BRIGHTNESS_MIN, 100, 1)
+        self.brightness.set_draw_value(False)
+        self.brightness.set_hexpand(True)
+        self.brightness_handler = self.brightness.connect(
+            "value-changed", lambda scale: set_brightness_percent(scale.get_value()))
+        brightness.pack_start(self.brightness, True, True, 0)
+        layout.pack_start(brightness, False, False, 0)
+
         header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
         header.set_margin_top(14)
         header.set_margin_bottom(8)
@@ -661,12 +732,13 @@ class Shade(Gtk.Window):
         layout.pack_start(self.empty, False, False, 0)
 
         self.refresh_id = None
-        self.tiles_box, self.header_box = tiles, header
+        self.tiles_box, self.header_box, self.brightness_box = tiles, header, brightness
         self.connect("size-allocate", self.on_size)
 
     def on_size(self, widget, allocation):
         """The list takes the height left under the tiles and the header, and scrolls past it."""
-        used = 10 + self.tiles_box.get_allocated_height() + self.header_box.get_allocated_height() + 22 + 10
+        used = (10 + self.tiles_box.get_allocated_height() + 14 + self.brightness_box.get_allocated_height()
+                + self.header_box.get_allocated_height() + 22 + 10)
         height = max(100, allocation.height - used)
         if self.scroller.get_max_content_height() != height:
             self.scroller.set_max_content_height(height)
@@ -676,6 +748,8 @@ class Shade(Gtk.Window):
     def open(self):
         self.rebuild()
         self.refresh_toggles()
+        with self.brightness.handler_block(self.brightness_handler):
+            self.brightness.set_value(get_brightness_percent())
         self.show_all()
         self.update_empty()
         self.scroller.get_vadjustment().set_value(0)
@@ -996,6 +1070,7 @@ def main():
                                              Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
     bar = StatusBar()
     bar.show_all()
+    restore_brightness()
     GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, signal.SIGUSR1, lambda: bar.shade.toggle() or True)
     GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, signal.SIGUSR2, lambda: bar.shade.close() or True)
     try:
