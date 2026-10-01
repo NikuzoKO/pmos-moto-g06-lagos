@@ -1,0 +1,15 @@
+[Unit]
+Description=Rear flashlight (AW36515 over MediaTek's flashlight core)
+# Part of the camera stack the second stage blacklists; loaded explicitly for
+# the torch, /sys/class/flashlight_core/flashlight/flashlight_torch ("0 0 0 1"
+# = on). systemd-modules-load refuses blacklisted modules, so not modules-load.d
+ConditionPathExists=/usr/lib/modules/%v/vendor_dlkm/flashlights-aw36515.ko
+After=systemd-udevd.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/modprobe -a flashlight flashlights_aw36515
+
+[Install]
+WantedBy=multi-user.target

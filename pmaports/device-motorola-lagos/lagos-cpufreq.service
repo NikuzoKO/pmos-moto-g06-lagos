@@ -1,0 +1,15 @@
+[Unit]
+Description=CPU frequency scaling (MediaTek CPU_DVFS, schedutil)
+# Without it no cpufreq policy exists and both clusters stay at fixed clocks.
+# The second-stage blacklist keeps it from autoloading, and systemd-modules-load
+# refuses blacklisted modules, so it needs its own explicit modprobe
+ConditionPathExists=/usr/lib/modules/%v/vendor_dlkm/CPU_DVFS.ko
+After=systemd-udevd.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/modprobe CPU_DVFS
+
+[Install]
+WantedBy=multi-user.target
