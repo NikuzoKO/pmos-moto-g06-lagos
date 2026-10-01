@@ -4,6 +4,9 @@
 # honouring sxmo's .busy (silent until), .noring and .novibrate flags. Runs
 # again when an app updates a notification (WhatsApp does so for every new
 # message in a chat).
+# Low urgency = an ongoing notification or a repeat of an onlyAlertOnce one
+# (ATL sets it): Android stays quiet for those
+[ "$DUNST_URGENCY" = LOW ] && exit 0
 cfg="${XDG_CONFIG_HOME:-$HOME/.config}/sxmo"
 if [ -f "$cfg/.busy" ]; then
 	end="$(cat "$cfg/.busy")"
