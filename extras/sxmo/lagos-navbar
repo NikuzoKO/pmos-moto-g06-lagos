@@ -13,8 +13,10 @@
 #            minimized ones included; tap a card to switch to it (a minimized
 #            one comes back onto the current workspace), x to close it,
 #            "Clear all" closes them all
-#   keyboard (bottom right, only while wvkbd is up) hides the keyboard. No
-#            polling: an invisible 1px-wide layer surface spans the usable
+#   keyboard (bottom right) shows or hides wvkbd; the chevron points the
+#            way a tap moves it. wvkbd still shows itself on text focus, but
+#            sxmo's bemenu prompts take no text-input, so they need this. No
+#            polling for the state: an invisible 1px-wide layer surface spans the usable
 #            height, and sway reconfigures it when wvkbd's exclusive zone
 #            comes or goes
 # Started from ~/.config/services/lagos-navbar.service (superd).
@@ -294,6 +296,7 @@ class NavButton(Gtk.DrawingArea):
         self.ripple = Ripple(self)
         self.inside = False
         self.enabled = True
+        self.flipped = False  # keyboard glyph: chevron up instead of down
         self.set_hexpand(True)
         self.add_events(Gdk.EventMask.BUTTON_PRESS_MASK | Gdk.EventMask.BUTTON_RELEASE_MASK
                         | Gdk.EventMask.LEAVE_NOTIFY_MASK)
@@ -363,9 +366,10 @@ class NavButton(Gtk.DrawingArea):
             context.set_line_cap(cairo.LINE_CAP_ROUND)
             context.set_line_width(1.8)
             context.stroke()
-            context.move_to(cx - half * 0.45, cy + half * 0.55)
-            context.line_to(cx, cy + half * 0.95)
-            context.line_to(cx + half * 0.45, cy + half * 0.55)
+            near, far = (0.95, 0.55) if self.flipped else (0.55, 0.95)
+            context.move_to(cx - half * 0.45, cy + half * near)
+            context.line_to(cx, cy + half * far)
+            context.line_to(cx + half * 0.45, cy + half * near)
             context.stroke()
         else:
             rounded_rectangle(context, cx - half * 0.85, cy - half * 0.85, half * 1.7, half * 1.7, 3)
@@ -396,19 +400,23 @@ class NavBar(Gtk.Window):
         # 50%, 79% of the width), the keyboard button in the last one
         box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
         box.set_homogeneous(True)
-        self.keyboard_button = NavButton("keyboard", self.hide_keyboard)
-        self.keyboard_button.set_enabled(False)
+        self.keyboard_button = NavButton("keyboard", self.toggle_keyboard)
+        self.keyboard_visible = False
         for child in (Gtk.Box(), NavButton("back", self.back), Gtk.Box(), NavButton("home", self.home),
                       Gtk.Box(), NavButton("recents", self.toggle_recents), self.keyboard_button):
             box.pack_start(child, True, True, 0)
         self.add(box)
 
-        self.probe = KeyboardProbe(self.keyboard_button.set_enabled)
+        self.probe = KeyboardProbe(self.on_keyboard_change)
         self.probe.show_all()
 
-    def hide_keyboard(self):
-        run("sxmo_keyboard.sh", "close")
-        self.keyboard_button.set_enabled(False)
+    def on_keyboard_change(self, visible):
+        self.keyboard_visible = visible
+        self.keyboard_button.flipped = not visible
+        self.keyboard_button.queue_draw()
+
+    def toggle_keyboard(self):
+        run("sxmo_keyboard.sh", "close" if self.keyboard_visible else "open")
 
     def on_draw(self, widget, context):
         context.set_operator(cairo.OPERATOR_SOURCE)
