@@ -6,7 +6,8 @@
 #   back     sends Escape to the focused window (ATL maps an unconsumed Escape
 #            to Activity.onBackPressed; native apps close dialogs/menus with it)
 #   home     minimizes every window (sway has no minimize: they go to the
-#            scratchpad, tiled ones marked so they tile again on restore);
+#            scratchpad, tiled ones marked so they tile again however they
+#            come back (RetileWatcher);
 #            pressed again on the empty desktop it opens the sxmo app menu,
 #            which is the closest thing to a launcher
 #   recents  full-screen card list of open windows, most recent first,
@@ -89,6 +90,46 @@ def sway_json(kind):
         return json.loads(subprocess.run(["swaymsg", "-r", "-t", kind], capture_output=True, text=True, timeout=3).stdout)
     except (OSError, ValueError, subprocess.TimeoutExpired):
         return None
+
+
+class RetileWatcher:
+    """Follows sway's window events. Any way a minimized window comes back
+    (recents, a notification, relaunching the app, sxmo) pulls it out of the
+    scratchpad floating and focuses it; if home had marked it as tiled, tile it
+    again there. Restarts swaymsg if it exits (sway restarted)."""
+
+    def __init__(self):
+        self.start()
+
+    def start(self):
+        try:
+            self.process = subprocess.Popen(["swaymsg", "-r", "-m", "-t", "subscribe", '["window"]'],
+                                            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+        except OSError:
+            GLib.timeout_add_seconds(5, self.restart)
+            return
+        GLib.io_add_watch(self.process.stdout, GLib.PRIORITY_DEFAULT, GLib.IO_IN | GLib.IO_HUP, self.on_line)
+
+    def restart(self):
+        self.start()
+        return False
+
+    def on_line(self, stream, condition):
+        line = stream.readline()
+        if not line:
+            self.process.wait()
+            GLib.timeout_add_seconds(2, self.restart)
+            return False
+        try:
+            event = json.loads(line)
+        except ValueError:
+            return True
+        container = event.get("container") or {}
+        if (event.get("change") == "focus" and container.get("type") == "floating_con"
+                and TILED_MARK in (container.get("marks") or [])):
+            criteria = f"[con_id={container['id']}]"
+            sway(f"{criteria} floating disable; {criteria} unmark {TILED_MARK}")
+        return True
 
 
 class KeyboardProbe(Gtk.Window):
@@ -527,12 +568,8 @@ class Card(Gtk.EventBox):
         allocation = self.get_allocation()
         if 0 <= event.x <= allocation.width and 0 <= event.y <= allocation.height:
             haptic()
-            criteria = f"[con_id={self.window['id']}]"
-            if TILED_MARK in self.window["marks"]:
-                # focus pulls a scratchpad window out as floating; tile it again
-                sway(f"{criteria} focus; {criteria} floating disable; {criteria} unmark {TILED_MARK}")
-            else:
-                sway(f"{criteria} focus")
+            # focus pulls a scratchpad window out; RetileWatcher tiles it again
+            sway(f"[con_id={self.window['id']}] focus")
             self.recents.dismiss()
         return True
 
@@ -654,6 +691,7 @@ def main():
         recents.set_visual(visual)
     bar = NavBar(recents)
     bar.show_all()
+    RetileWatcher()
     Gtk.main()
 
 
