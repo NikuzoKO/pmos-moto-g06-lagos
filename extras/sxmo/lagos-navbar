@@ -47,6 +47,8 @@ RIPPLE_RADIUS = 20
 CARD_HEIGHT = 64
 SCRATCHPAD = "__i3_scratch"
 TILED_MARK = "_lagos_tiled"  # sway never draws marks that start with "_"
+RETILE_RETRY_MS = 80
+RETILE_TRIES = 10
 CARD_RADIUS = 14
 CARD_SPACING = 10
 SIDE_MARGIN = 14
@@ -127,9 +129,24 @@ class RetileWatcher:
         container = event.get("container") or {}
         if (event.get("change") == "focus" and container.get("type") == "floating_con"
                 and TILED_MARK in (container.get("marks") or [])):
-            criteria = f"[con_id={container['id']}]"
-            sway(f"{criteria} floating disable; {criteria} unmark {TILED_MARK}")
+            GLib.timeout_add(RETILE_RETRY_MS, self.retile, container["id"], RETILE_TRIES)
         return True
+
+    def retile(self, con_id, tries):
+        # the focus event can arrive while the window is still a hidden
+        # scratchpad container, and sway refuses to change floating on those
+        criteria = f"[con_id={con_id}]"
+        try:
+            reply = json.loads(subprocess.run(["swaymsg", "-r", f"{criteria} floating disable"],
+                                              capture_output=True, text=True, timeout=3).stdout)
+            done = all(r.get("success") for r in reply)
+        except (OSError, ValueError, subprocess.TimeoutExpired):
+            done = False
+        if done or tries <= 1:
+            sway(f"{criteria} unmark {TILED_MARK}")
+        else:
+            GLib.timeout_add(RETILE_RETRY_MS, self.retile, con_id, tries - 1)
+        return False
 
 
 class KeyboardProbe(Gtk.Window):
