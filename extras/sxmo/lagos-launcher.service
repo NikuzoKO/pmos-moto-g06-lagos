@@ -1,0 +1,7 @@
+[Unit]
+Description=App drawer (lagos-launcher open|close|toggle)
+
+[Service]
+Type=simple
+Restart=always
+ExecStart=/home/nikuzo/.local/bin/lagos-launcher

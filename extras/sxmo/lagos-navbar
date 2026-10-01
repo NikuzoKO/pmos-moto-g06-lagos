@@ -8,8 +8,8 @@
 #   home     minimizes every window (sway has no minimize: they go to the
 #            scratchpad; they tile again however they come back
 #            (RetileWatcher), except floating ones, which home marks);
-#            pressed again on the empty desktop it opens the sxmo app menu,
-#            which is the closest thing to a launcher
+#            pressed again on the empty desktop it toggles the app drawer
+#            (lagos-launcher)
 #   recents  full-screen card list of open windows, most recent first,
 #            minimized ones included; tap a card to switch to it (a minimized
 #            one comes back onto the current workspace), x to close it,
@@ -541,7 +541,7 @@ class NavBar(Gtk.Window):
         self.recents.dismiss()
         shown = [w for w in windows_most_recent_first() if w["workspace"] != SCRATCHPAD]
         if not shown:
-            run("sxmo_appmenu.sh")
+            run(os.path.expanduser("~/.local/bin/lagos-launcher"), "toggle")
             return
         commands = []
         for window in shown:

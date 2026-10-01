@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=WhatsApp
+Comment=WhatsApp on Android Translation Layer
+Exec=/home/nikuzo/.local/bin/atl-whatsapp
+Icon=com.whatsapp
+StartupWMClass=com.whatsapp
+Categories=Network;InstantMessaging;

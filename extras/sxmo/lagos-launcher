@@ -1,0 +1,260 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: MIT
+# App drawer for sxmo on sway: a layer-shell grid of every installed app that
+# slides up between the status bar and the nav bar. Runs in the background
+# (superd service lagos-launcher) so it opens instantly; control it with
+#   lagos-launcher open | close | toggle | close-if-top
+# open comes from a swipe up on an empty workspace and from Home pressed on
+# one (hooks/sxmo_hook_inputhandler.sh, lagos-navbar). close-if-top is the
+# swipe down: lisgd sees every touch, including the ones that scroll the grid,
+# so it only closes when the grid already sat at the top before the swipe.
+# Tapping an app launches it and closes the drawer; Escape (the nav bar's back)
+# closes it too.
+
+import os
+import signal
+import sys
+
+RUNTIME = os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}"
+PIDFILE = os.path.join(RUNTIME, "lagos-launcher.pid")
+# GLib can only watch these signals; SIGWINCH stands in for "toggle"
+COMMANDS = {"open": signal.SIGUSR1, "close": signal.SIGUSR2, "toggle": signal.SIGWINCH,
+            "close-if-top": signal.SIGHUP}
+
+if len(sys.argv) > 1:
+    # control side: signal the running drawer, no GTK import (fast)
+    if sys.argv[1] not in COMMANDS:
+        sys.exit(f"usage: {sys.argv[0]} [{'|'.join(COMMANDS)}]")
+    try:
+        with open(PIDFILE) as handle:
+            os.kill(int(handle.read()), COMMANDS[sys.argv[1]])
+    except (OSError, ValueError) as error:
+        sys.exit(f"lagos-launcher not running: {error}")
+    sys.exit(0)
+
+import subprocess  # noqa: E402
+import time  # noqa: E402
+
+import gi  # noqa: E402
+
+gi.require_version("Gtk", "3.0")
+gi.require_version("Gdk", "3.0")
+gi.require_version("GtkLayerShell", "0.1")
+from gi.repository import Gdk, Gio, GLib, Gtk, GtkLayerShell, Pango  # noqa: E402
+
+COLUMNS = 4
+ICON_SIZE = 44  # logical px
+SLIDE_MS = 220
+# close-if-top: the grid must have rested at the top this long before the
+# gesture arrives (lisgd reports a swipe when the finger lifts)
+TOP_REST_S = 0.6
+
+# Rosé Pine, matching the bars
+CSS = """
+window.launcher { background: transparent; }
+.panel { background: #191724; border-radius: 22px 22px 0 0; }
+.panel entry { background: #26233a; color: #e0def4; caret-color: #c4a7e7;
+    border: none; box-shadow: none; border-radius: 18px; padding: 6px 16px; margin: 14px 16px 6px 16px; }
+.panel entry image { color: #908caa; }
+.panel scrolledwindow, .panel viewport, .panel flowbox { background: transparent; }
+.panel flowboxchild { padding: 0; }
+button.app { background: transparent; border: none; box-shadow: none; border-radius: 16px;
+    padding: 10px 2px 6px 2px; }
+button.app:active { background: #403d52; }
+button.app label { color: #e0def4; font-size: 9pt; }
+.handle { background: #6e6a86; border-radius: 2px; min-height: 4px; min-width: 36px; margin-top: 8px; }
+.empty { color: #908caa; }
+"""
+
+
+def launch(app):
+    # through sway, so the app is a child of sway, not of this service
+    path = app.get_filename()
+    if path:
+        subprocess.Popen(["swaymsg", "exec", f"gio launch '{path}'"],
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    else:
+        app.launch([], None)
+
+
+class Launcher(Gtk.Window):
+    def __init__(self):
+        super().__init__()
+        self.get_style_context().add_class("launcher")
+        visual = self.get_screen().get_rgba_visual()
+        if visual:
+            self.set_visual(visual)
+        GtkLayerShell.init_for_window(self)
+        GtkLayerShell.set_namespace(self, "lagos-launcher")
+        GtkLayerShell.set_layer(self, GtkLayerShell.Layer.OVERLAY)
+        for edge in (GtkLayerShell.Edge.TOP, GtkLayerShell.Edge.BOTTOM,
+                     GtkLayerShell.Edge.LEFT, GtkLayerShell.Edge.RIGHT):
+            GtkLayerShell.set_anchor(self, edge, True)
+        # exclusive zone 0: stays between the status bar and the nav bar
+        GtkLayerShell.set_keyboard_mode(self, GtkLayerShell.KeyboardMode.ON_DEMAND)
+
+        self.revealer = Gtk.Revealer()
+        self.revealer.set_transition_type(Gtk.RevealerTransitionType.SLIDE_UP)
+        self.revealer.set_transition_duration(SLIDE_MS)
+        self.revealer.set_valign(Gtk.Align.FILL)
+        self.revealer.set_vexpand(True)
+        self.revealer.connect("notify::child-revealed", self.on_revealed)
+        self.add(self.revealer)
+
+        panel = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        panel.get_style_context().add_class("panel")
+        panel.set_vexpand(True)
+        self.revealer.add(panel)
+
+        handle = Gtk.Box()
+        handle.get_style_context().add_class("handle")
+        handle.set_halign(Gtk.Align.CENTER)
+        panel.pack_start(handle, False, False, 0)
+
+        self.search = Gtk.SearchEntry()
+        self.search.set_placeholder_text("Search apps")
+        self.search.connect("search-changed", lambda entry: self.flow.invalidate_filter())
+        self.search.connect("activate", self.on_search_activate)
+        panel.pack_start(self.search, False, False, 0)
+
+        self.scroller = Gtk.ScrolledWindow()
+        self.scroller.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        self.scroller.set_vexpand(True)
+        self.top_since = time.monotonic()
+        self.scroller.get_vadjustment().connect("value-changed", self.on_scrolled)
+        panel.pack_start(self.scroller, True, True, 0)
+
+        self.flow = Gtk.FlowBox()
+        self.flow.set_homogeneous(True)
+        self.flow.set_min_children_per_line(COLUMNS)
+        self.flow.set_max_children_per_line(COLUMNS)
+        self.flow.set_selection_mode(Gtk.SelectionMode.NONE)
+        self.flow.set_valign(Gtk.Align.START)
+        self.flow.set_margin_start(8)
+        self.flow.set_margin_end(8)
+        self.flow.set_margin_bottom(12)
+        self.flow.set_filter_func(self.filter)
+        self.scroller.add(self.flow)
+
+        self.connect("key-press-event", self.on_key)
+        self.app_ids = None
+        self.monitor = Gio.AppInfoMonitor.get()
+        self.monitor.connect("changed", lambda monitor: self.populate())
+        self.populate()
+
+    # --- apps ---------------------------------------------------------------
+
+    def populate(self):
+        apps = [app for app in Gio.AppInfo.get_all() if app.should_show()]
+        apps.sort(key=lambda app: app.get_display_name().casefold())
+        ids = [app.get_id() for app in apps]
+        if ids == self.app_ids:
+            return
+        self.app_ids = ids
+        for child in self.flow.get_children():
+            self.flow.remove(child)
+        for app in apps:
+            self.flow.add(self.app_button(app))
+        self.flow.show_all()
+
+    def app_button(self, app):
+        button = Gtk.Button()
+        button.get_style_context().add_class("app")
+        button.set_relief(Gtk.ReliefStyle.NONE)
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        icon = app.get_icon() or Gio.ThemedIcon.new("application-x-executable")
+        image = Gtk.Image.new_from_gicon(icon, Gtk.IconSize.DIALOG)
+        image.set_pixel_size(ICON_SIZE)
+        box.pack_start(image, False, False, 0)
+        label = Gtk.Label(label=app.get_display_name())
+        label.set_ellipsize(Pango.EllipsizeMode.END)
+        label.set_max_width_chars(9)
+        label.set_lines(2)
+        label.set_line_wrap(True)
+        label.set_justify(Gtk.Justification.CENTER)
+        box.pack_start(label, False, False, 0)
+        button.add(box)
+        button.app = app
+        button.connect("clicked", self.on_app_clicked)
+        return button
+
+    def filter(self, child):
+        query = self.search.get_text().strip().casefold()
+        if not query:
+            return True
+        app = child.get_child().app
+        haystack = " ".join(filter(None, (app.get_display_name(), app.get_name(), app.get_id(),
+                                          app.get_description() or "")))
+        return query in haystack.casefold()
+
+    def on_app_clicked(self, button):
+        launch(button.app)
+        self.close_drawer()
+
+    def on_search_activate(self, entry):
+        for child in self.flow.get_children():
+            if child.get_child_visible() and self.filter(child):
+                self.on_app_clicked(child.get_child())
+                return
+
+    # --- open / close -------------------------------------------------------
+
+    def open_drawer(self):
+        if self.revealer.get_reveal_child():
+            return
+        self.search.set_text("")
+        self.scroller.get_vadjustment().set_value(0)
+        self.top_since = time.monotonic()
+        self.show_all()
+        # let the surface map before the slide, or the first frames are lost
+        GLib.idle_add(self.revealer.set_reveal_child, True)
+
+    def close_drawer(self):
+        if self.get_visible():
+            self.revealer.set_reveal_child(False)
+
+    def toggle_drawer(self):
+        if self.revealer.get_reveal_child():
+            self.close_drawer()
+        else:
+            self.open_drawer()
+
+    def close_if_top(self):
+        adjustment = self.scroller.get_vadjustment()
+        if adjustment.get_value() <= 0 and time.monotonic() - self.top_since >= TOP_REST_S:
+            self.close_drawer()
+
+    def on_scrolled(self, adjustment):
+        if adjustment.get_value() > 0:
+            self.top_since = float("inf")
+        elif self.top_since == float("inf"):
+            self.top_since = time.monotonic()
+
+    def on_revealed(self, revealer, _param):
+        if not revealer.get_child_revealed() and not revealer.get_reveal_child():
+            self.hide()
+
+    def on_key(self, widget, event):
+        if event.keyval == Gdk.KEY_Escape:
+            self.close_drawer()
+            return True
+        return False
+
+
+def main():
+    provider = Gtk.CssProvider()
+    provider.load_from_data(CSS.encode())
+    Gtk.StyleContext.add_provider_for_screen(Gdk.Screen.get_default(), provider,
+                                             Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+    launcher = Launcher()
+    actions = {signal.SIGUSR1: launcher.open_drawer, signal.SIGUSR2: launcher.close_drawer,
+               signal.SIGWINCH: launcher.toggle_drawer, signal.SIGHUP: launcher.close_if_top}
+    for signum, action in actions.items():
+        GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, signum, lambda action=action: action() or True)
+    with open(PIDFILE, "w") as handle:
+        handle.write("%d\n" % os.getpid())
+    Gtk.main()
+
+
+if __name__ == "__main__":
+    main()

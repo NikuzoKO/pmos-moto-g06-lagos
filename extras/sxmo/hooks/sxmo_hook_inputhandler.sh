@@ -100,6 +100,22 @@ if sxmo_state.sh is_locked; then
 	exit 0
 fi
 
+# Empty workspace: swipe up opens the app drawer (lagos-launcher), swipe down
+# closes it. The drawer is a layer surface, so it never shows up as WMCLASS;
+# close-if-top ignores the downward swipes that only scroll its grid.
+if [ -z "$WMCLASS" ]; then
+	case "$ACTION" in
+		"oneup"|"mediumoneup"|"longoneup"|"upbottomedge")
+			"$HOME"/.local/bin/lagos-launcher open
+			exit 0
+			;;
+		"onedown"|"mediumonedown"|"longonedown")
+			"$HOME"/.local/bin/lagos-launcher close-if-top
+			exit 0
+			;;
+	esac
+fi
+
 #special context-sensitive handling
 case "$WMCLASS" in
 	*"mpv"*)
