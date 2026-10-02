@@ -1,0 +1,131 @@
+#!/usr/bin/env python3
+# obsidian: run the Flathub Obsidian (md.obsidian.Obsidian, glibc Electron) on
+# this musl phone without flatpak's sandbox. The stock GKI kernel has no user or
+# PID namespaces (CONFIG_USER_NS/CONFIG_PID_NS unset), so bubblewrap can't start
+# anything. Instead: as root, a private mount namespace (mount namespaces do
+# exist), the flatpak runtime bound as /usr, the app as /app, GL extension as
+# /run/gl, host /proc /dev /sys /tmp $HOME and $XDG_RUNTIME_DIR bound in, then
+# chroot, drop back to the calling user and exec Electron with --no-sandbox.
+# The mounts vanish with the namespace when Obsidian exits.
+#
+# Install/update: flatpak install --user flathub md.obsidian.Obsidian
+# Extra Electron flags: one per line in ~/.var/app/md.obsidian.Obsidian/config/obsidian/user-flags.conf
+import os
+import pwd
+import shutil
+import subprocess
+import sys
+
+def paths(home):
+    fp = os.path.join(home, ".local/share/flatpak")
+    return {
+        "runtime": f"{fp}/runtime/org.freedesktop.Platform/aarch64/26.08/active/files",
+        "gl": f"{fp}/runtime/org.freedesktop.Platform.GL.default/aarch64/26.08/active/files",
+        "app": f"{fp}/app/md.obsidian.Obsidian/current/active/files",
+        "root": os.path.join(home, ".local/share/obsidian-root"),
+    }
+
+
+def mount(*args):
+    subprocess.run(["mount", *args], check=True)
+
+
+def prepare_root(p, user):
+    """Top-level skeleton (owned by the user); /etc is a copy so ostree files stay untouched."""
+    root = p["root"]
+    for d in ("usr", "app", "proc", "sys", "dev", "tmp", "run/gl", "run/host/fonts", "var/tmp", user.pw_dir, "etc"):
+        os.makedirs(os.path.join(root, d.lstrip("/")), exist_ok=True)
+    for link in ("bin", "lib", "sbin"):
+        dst = os.path.join(root, link)
+        if not os.path.islink(dst):
+            os.symlink(f"usr/{link}", dst)
+    # the runtime's fontconfig includes this to find the host fonts bound at /run/host/fonts
+    with open(os.path.join(root, "run/host/font-dirs.xml"), "w") as f:
+        f.write('<?xml version="1.0"?>\n<!DOCTYPE fontconfig SYSTEM "fonts.dtd">\n'
+                '<fontconfig><dir>/run/host/fonts</dir></fontconfig>\n')
+    stamp = os.path.join(root, "etc/.runtime")
+    if not os.path.exists(stamp) or open(stamp).read() != os.path.realpath(p["runtime"]):
+        shutil.rmtree(os.path.join(root, "etc"))
+        shutil.copytree(os.path.join(p["runtime"], "etc"), os.path.join(root, "etc"), symlinks=True)
+        with open(os.path.join(root, "etc/passwd"), "a") as f:
+            f.write(f"{user.pw_name}:x:{user.pw_uid}:{user.pw_gid}::{user.pw_dir}:/bin/sh\n")
+        with open(os.path.join(root, "etc/group"), "a") as f:
+            f.write(f"{user.pw_name}:x:{user.pw_gid}:\n")
+        for f in ("resolv.conf", "hosts", "localtime", "machine-id"):
+            dst = os.path.join(root, "etc", f)
+            if os.path.lexists(dst):
+                os.remove(dst)
+            if os.path.exists(f"/etc/{f}"):
+                shutil.copy(f"/etc/{f}", dst)
+        with open(stamp, "w") as f:
+            f.write(os.path.realpath(p["runtime"]))
+
+
+def as_root():
+    uid = int(os.environ["OBSIDIAN_UID"])
+    user = pwd.getpwuid(uid)
+    p = paths(user.pw_dir)
+    root = p["root"]
+    for k in ("runtime", "gl", "app"):
+        if not os.path.isdir(p[k]):
+            sys.exit(f"obsidian: missing {p[k]} (flatpak install --user flathub md.obsidian.Obsidian)")
+
+    os.unshare(os.CLONE_NEWNS)
+    mount("--make-rprivate", "/")
+    binds = [(p["runtime"], "usr"), (p["app"], "app"), (p["gl"], "run/gl"), ("/proc", "proc"),
+             ("/sys", "sys"), ("/dev", "dev"), ("/tmp", "tmp"), ("/usr/share/fonts", "run/host/fonts"),
+             (user.pw_dir, user.pw_dir.lstrip("/"))]
+    if os.path.isdir("/run/dbus"):
+        os.makedirs(os.path.join(root, "run/dbus"), exist_ok=True)
+        binds.append(("/run/dbus", "run/dbus"))
+    rt = os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{uid}")
+    os.makedirs(os.path.join(root, rt.lstrip("/")), exist_ok=True)
+    binds.append((rt, rt.lstrip("/")))
+    for src, dst in binds:
+        mount("--rbind", src, os.path.join(root, dst))
+    # the runtime and app bind mounts are writable through to ostree's files: make them read-only
+    for dst in ("usr", "app", "run/gl"):
+        mount("-o", "remount,bind,ro", os.path.join(root, dst))
+
+    os.chroot(root)
+    os.chdir(user.pw_dir)
+    os.setgroups(os.getgrouplist(user.pw_name, user.pw_gid))
+    os.setgid(user.pw_gid)
+    os.setuid(uid)
+
+    env = {k: v for k, v in os.environ.items()
+           if k in ("WAYLAND_DISPLAY", "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS", "LANG", "LC_ALL",
+                    "XDG_SESSION_TYPE", "XDG_CURRENT_DESKTOP", "GTK_IM_MODULE", "OBSIDIAN_GPU")}
+    env.update(HOME=user.pw_dir, USER=user.pw_name, LOGNAME=user.pw_name, SHELL="/bin/sh",
+               PATH="/app/bin:/usr/bin",
+               XDG_CONFIG_HOME=f"{user.pw_dir}/.var/app/md.obsidian.Obsidian/config",
+               XDG_DATA_HOME=f"{user.pw_dir}/.var/app/md.obsidian.Obsidian/data",
+               XDG_CACHE_HOME=f"{user.pw_dir}/.var/app/md.obsidian.Obsidian/cache",
+               LD_LIBRARY_PATH="/app/lib:/run/gl/lib",
+               LIBGL_DRIVERS_PATH="/run/gl/lib/dri",
+               GBM_BACKENDS_PATH="/run/gl/lib/gbm",
+               __EGL_VENDOR_LIBRARY_DIRS="/run/gl/share/glvnd/egl_vendor.d",
+               ELECTRON_OZONE_PLATFORM_HINT="wayland")
+    for d in ("XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME"):
+        os.makedirs(env[d], exist_ok=True)
+
+    args = ["/app/obsidian", "--no-sandbox", "--ozone-platform=wayland",
+            "--enable-features=WaylandWindowDecorations", "--enable-wayland-ime", "--wayland-text-input-version=3",
+            # no gnome-keyring prompt (gcr-prompter) for Electron's safeStorage key
+            "--password-store=basic"]
+    if env.get("OBSIDIAN_GPU") != "1":
+        args.append("--disable-gpu")
+    flags = os.path.join(env["XDG_CONFIG_HOME"], "obsidian/user-flags.conf")
+    if os.path.exists(flags):
+        args += [l.strip() for l in open(flags) if l.strip() and not l.lstrip().startswith("#")]
+    os.execve(args[0], args + sys.argv[1:], env)
+
+
+if __name__ == "__main__":
+    if os.getuid() == 0 and "OBSIDIAN_UID" in os.environ:
+        as_root()
+    user = pwd.getpwuid(os.getuid())
+    prepare_root(paths(user.pw_dir), user)
+    keep = "WAYLAND_DISPLAY,XDG_RUNTIME_DIR,DBUS_SESSION_BUS_ADDRESS,LANG,LC_ALL,XDG_SESSION_TYPE,XDG_CURRENT_DESKTOP,GTK_IM_MODULE,OBSIDIAN_GPU"
+    os.execvp("sudo", ["sudo", "-n", f"--preserve-env={keep}", f"OBSIDIAN_UID={os.getuid()}",
+                       sys.executable, os.path.realpath(__file__), *sys.argv[1:]])

@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Obsidian
+StartupWMClass=md.obsidian.Obsidian
+Comment=Markdown notes and knowledge base
+MimeType=x-scheme-handler/obsidian;
+Categories=Office;
+Exec=/home/nikuzo/.local/bin/obsidian %U
+Icon=md.obsidian.Obsidian
+Terminal=false
