@@ -365,19 +365,6 @@ case "$WMCLASS" in
 		esac
 
 		case "$WMCLASS" in # Handle general scrolling without touch support
-			*"kitty"*)
-				# kitty's Wayland backend ignores touch: swipe = one page of scrollback
-				case "$ACTION" in
-					*"onedown")
-						sxmo_type.sh -M Ctrl -M Shift -k Page_Up
-						exit 0
-						;;
-					*"oneup")
-						sxmo_type.sh -M Ctrl -M Shift -k Page_Down
-						exit 0
-						;;
-				esac
-				;;
 			*"st"*)
 				case "$ACTION" in
 					*"onedown")

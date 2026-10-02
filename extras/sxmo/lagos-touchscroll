@@ -1,0 +1,240 @@
+#!/usr/bin/env python3
+# lagos-touchscroll: smooth finger scrolling for apps without touch support
+# (kitty's Wayland backend ignores wl_touch). Reads the touchscreen directly;
+# a one-finger vertical drag that starts inside a visible window of a
+# listed app_id becomes finger-source scroll events on a wlr virtual pointer,
+# ended by axis_stop on release (kitty adds its own momentum).
+#
+# Wayland and sway IPC are spoken over raw sockets (no pywayland/evdev here).
+
+import json
+import os
+import select
+import socket
+import struct
+import sys
+import time
+
+APPS = {"kitty"}
+DRAG_START = 10      # logical px of vertical travel before a drag becomes a scroll
+SCALE = 1.0          # scroll px per finger px
+
+EV_SYN, EV_KEY, EV_ABS = 0, 1, 3
+SYN_REPORT = 0
+BTN_TOUCH = 0x14A
+ABS_MT_SLOT, ABS_MT_POSITION_X, ABS_MT_POSITION_Y, ABS_MT_TRACKING_ID = 0x2F, 0x35, 0x36, 0x39
+EVIOCGABS = lambda axis: 0x80184540 + axis  # _IOR('E', 0x40 + axis, struct input_absinfo)
+
+
+DEBUG = bool(os.environ.get("LAGOS_TS_DEBUG"))
+
+
+def dbg(*a):
+    if DEBUG:
+        print(*a, file=sys.stderr, flush=True)
+
+
+def now_ms():
+    return int(time.monotonic() * 1000) & 0xFFFFFFFF
+
+
+def find_touch():
+    for name in sorted(os.listdir("/sys/class/input")):
+        if not name.startswith("event"):
+            continue
+        try:
+            with open(f"/sys/class/input/{name}/device/name") as f:
+                n = f.read().lower()
+            if "chipone" in n or "touch" in n:
+                return f"/dev/input/{name}"
+        except OSError:
+            pass
+    sys.exit("no touchscreen found")
+
+
+def absmax(fd, axis):
+    import fcntl
+    buf = bytearray(24)
+    fcntl.ioctl(fd, EVIOCGABS(axis), buf)
+    return struct.unpack("6i", buf)[2]
+
+
+# ---- sway IPC -------------------------------------------------------------
+
+def sway_tree():
+    path = os.environ.get("SWAYSOCK")
+    s = socket.socket(socket.AF_UNIX)
+    s.connect(path)
+    s.sendall(b"i3-ipc" + struct.pack("<II", 0, 4))
+    hdr = b""
+    while len(hdr) < 14:
+        hdr += s.recv(14 - len(hdr))
+    n = struct.unpack("<I", hdr[6:10])[0]
+    data = b""
+    while len(data) < n:
+        data += s.recv(n - len(data))
+    s.close()
+    return json.loads(data)
+
+
+def window_at(node, lx, ly):
+    """Visible window under the logical point; floating ones are on top."""
+    hit = None
+    if node.get("type") in ("con", "floating_con") and node.get("visible") and not node.get("nodes"):
+        r = node["rect"]
+        if r["x"] <= lx < r["x"] + r["width"] and r["y"] <= ly < r["y"] + r["height"]:
+            hit = node
+    for c in node.get("nodes", []) + node.get("floating_nodes", []):
+        hit = window_at(c, lx, ly) or hit
+    return hit
+
+
+# ---- minimal Wayland client -----------------------------------------------
+
+class Wl:
+    def __init__(self):
+        path = os.path.join(os.environ["XDG_RUNTIME_DIR"], os.environ.get("WAYLAND_DISPLAY", "wayland-1"))
+        self.s = socket.socket(socket.AF_UNIX)
+        self.s.connect(path)
+        self.buf = b""
+        self.next_id = 2
+        self.globals = {}
+        self.registry = self.new_id()
+        self.send(1, 1, struct.pack("<I", self.registry))  # wl_display.get_registry
+        self.roundtrip()
+        name, ver = self.globals["zwlr_virtual_pointer_manager_v1"]
+        self.mgr = self.new_id()
+        iface = b"zwlr_virtual_pointer_manager_v1\0"
+        iface += b"\0" * (-len(iface) % 4)
+        self.send(self.registry, 0, struct.pack("<II", name, len(iface.rstrip(b"\0")) + 1)
+                  + iface + struct.pack("<II", 1, self.mgr))
+        self.ptr = self.new_id()
+        self.send(self.mgr, 0, struct.pack("<II", 0, self.ptr))  # create_virtual_pointer(seat=NULL)
+        self.roundtrip()
+
+    def new_id(self):
+        i = self.next_id
+        self.next_id += 1
+        return i
+
+    def send(self, obj, op, args=b""):
+        self.s.sendall(struct.pack("<II", obj, ((8 + len(args)) << 16) | op) + args)
+
+    def roundtrip(self):
+        cb = self.new_id()
+        self.send(1, 0, struct.pack("<I", cb))  # wl_display.sync
+        while not self.dispatch(want=cb):
+            pass
+
+    def dispatch(self, want=None):
+        """Read and handle events; True once callback `want` fired."""
+        data = self.s.recv(65536)
+        if not data:
+            sys.exit("wayland connection closed")
+        self.buf += data
+        done = False
+        while len(self.buf) >= 8:
+            obj, so = struct.unpack("<II", self.buf[:8])
+            size, op = so >> 16, so & 0xFFFF
+            if len(self.buf) < size:
+                break
+            body, self.buf = self.buf[8:size], self.buf[size:]
+            if obj == 1 and op == 0:  # wl_display.error
+                oid, code, slen = struct.unpack("<III", body[:12])
+                sys.exit(f"wayland error obj {oid} code {code}: {body[12:12 + slen - 1].decode()}")
+            elif obj == self.registry and op == 0:
+                name, slen = struct.unpack("<II", body[:8])
+                iface = body[8:8 + slen - 1].decode()
+                ver = struct.unpack("<I", body[8 + slen + (-slen % 4):][:4])[0]
+                self.globals[iface] = (name, ver)
+            elif obj == want:
+                done = True
+        return done
+
+    def scroll(self, x, y, xext, yext, dy, start=False):
+        dbg("scroll", round(dy, 1), "start" if start else "")
+        t = now_ms()
+        if start:
+            self.send(self.ptr, 1, struct.pack("<IIIII", t, x, y, xext, yext))  # motion_absolute
+        self.send(self.ptr, 5, struct.pack("<I", 1))  # axis_source finger
+        self.send(self.ptr, 3, struct.pack("<IIi", t, 0, int(dy * 256)))  # axis vertical
+        self.send(self.ptr, 4)  # frame
+
+    def stop(self):
+        self.send(self.ptr, 5, struct.pack("<I", 1))
+        self.send(self.ptr, 6, struct.pack("<II", now_ms(), 0))  # axis_stop
+        self.send(self.ptr, 4)
+
+
+# ---- main loop ------------------------------------------------------------
+
+def main():
+    dev = find_touch()
+    fd = os.open(dev, os.O_RDONLY)
+    xmax, ymax = absmax(fd, ABS_MT_POSITION_X), absmax(fd, ABS_MT_POSITION_Y)
+    wl = Wl()
+
+    slot, fingers = 0, set()
+    x = y = 0
+    down = False          # a single finger is on the screen
+    state = None          # None | "candidate" | "scroll" | "ignore"
+    rect = None
+    y0 = ylast = 0
+    lpx = 1.0             # device units per logical px
+
+    while True:
+        r, _, _ = select.select([fd, wl.s], [], [])
+        if wl.s in r:
+            wl.dispatch()
+        if fd not in r:
+            continue
+        data = os.read(fd, 24 * 64)
+        for i in range(0, len(data) - 23, 24):
+            _, _, typ, code, val = struct.unpack("<qqHHi", data[i:i + 24])
+            if typ == EV_ABS:
+                if code == ABS_MT_SLOT:
+                    slot = val
+                elif code == ABS_MT_TRACKING_ID:
+                    if val < 0:
+                        fingers.discard(slot)
+                    else:
+                        fingers.add(slot)
+                elif slot == 0 and code == ABS_MT_POSITION_X:
+                    x = val
+                elif slot == 0 and code == ABS_MT_POSITION_Y:
+                    y = val
+            elif typ == EV_SYN and code == SYN_REPORT:
+                if fingers == {0} and not down:
+                    down = True
+                    state = "ignore"
+                    try:
+                        tree = sway_tree()
+                        lpx = ymax / tree["rect"]["height"]
+                        node = window_at(tree, x / lpx, y / lpx)
+                    except (OSError, ValueError, KeyError, ZeroDivisionError):
+                        node = None
+                    if node and node.get("app_id") in APPS:
+                        state = "candidate"
+                    dbg("down", x, y, node and node.get("app_id"), state)
+                    y0 = ylast = y
+                elif down and fingers == {0}:
+                    if state == "candidate" and abs(y - y0) / lpx >= DRAG_START:
+                        state = "scroll"
+                        ylast = y
+                        wl.scroll(x, y, xmax, ymax, 0.0, start=True)
+                    elif state == "scroll" and y != ylast:
+                        d = -(y - ylast) / lpx * SCALE
+                        ylast = y
+                        wl.scroll(0, 0, 0, 0, d)
+                elif down and fingers != {0}:
+                    # lifted, or a second finger joined
+                    if state == "scroll":
+                        # axis_stop: kitty runs its own momentum scroll
+                        # (momentum_scroll) from the finger's last velocity
+                        wl.stop()
+                    state = "ignore" if fingers else None
+                    down = bool(fingers)
+
+
+if __name__ == "__main__":
+    main()

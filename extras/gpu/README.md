@@ -10,6 +10,8 @@ android15-6.6 @ 9b6ad5b4b813 (`~/build/gpu/lagos-gpu`, base commit ed33d91 there
 - `lagos-gpu-load` + `lagos-gpu.service`: insmod at boot with a crash guard
   (/var/lib/lagos/gpu-disabled), writes /run/lagos-gpu.env (WLR_RENDERER=gles2).
 - `tinydm-lagos-gpu.conf` → /etc/systemd/system/tinydm.service.d/lagos-gpu.conf.
+- `tinydm-lagos-swcursor.conf` → /etc/systemd/system/tinydm.service.d/lagos-swcursor.conf:
+  WLR_NO_HARDWARE_CURSORS=1 (the cursor plane underflows OVL0 on pointer motion).
 - `lagos-gles-guard [switch]`: moves the session to GLES2 and falls back to pixman
   if sway doesn't survive 30 s within 4 min.
 - `kmsgl.c`: GBM/EGL on card0 (mediatek) → mesa kmsro → panfrost, then AddFB2.

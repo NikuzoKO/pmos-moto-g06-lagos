@@ -1,0 +1,7 @@
+[Unit]
+Description=Finger scrolling for kitty (touch drags -> virtual pointer scroll)
+
+[Service]
+Type=simple
+Restart=always
+ExecStart=/home/nikuzo/.local/bin/lagos-touchscroll
