@@ -1,0 +1,13 @@
+#!/bin/sh
+# obsidian: Flathub's md.obsidian.Obsidian through lagos-flatpak-run (flatpak
+# itself can't start apps on this kernel). Skips Flathub's obsidian.sh/zypak
+# wrapper and runs Electron directly: no Chromium sandbox (needs user
+# namespaces), Wayland, no gnome-keyring prompt (gcr-prompter) for the
+# safeStorage key, software rendering unless OBSIDIAN_GPU=1.
+# Extra flags: one per line in ~/.var/app/md.obsidian.Obsidian/config/obsidian/user-flags.conf
+flags=$HOME/.var/app/md.obsidian.Obsidian/config/obsidian/user-flags.conf
+[ "$OBSIDIAN_GPU" = 1 ] || set -- --disable-gpu "$@"
+[ -s "$flags" ] && set -- $(grep -v '^ *#' "$flags") "$@"
+exec "$HOME"/.local/bin/lagos-flatpak-run --command=/app/obsidian md.obsidian.Obsidian \
+	--no-sandbox --ozone-platform=wayland --enable-features=WaylandWindowDecorations \
+	--enable-wayland-ime --wayland-text-input-version=3 --password-store=basic "$@"

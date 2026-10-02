@@ -1,0 +1,198 @@
+#!/usr/bin/env python3
+# lagos-flatpak-run [--command=CMD] APPID [ARGS...]
+#
+# Run a --user installed Flathub app on this phone without flatpak's sandbox.
+# The stock GKI kernel has no user or PID namespaces (CONFIG_USER_NS and
+# CONFIG_PID_NS unset), so bubblewrap can't start anything ("Creating new
+# namespace failed"). flatpak install/update still work; only `flatpak run`
+# doesn't. Instead, as root (passwordless sudo): a private mount namespace,
+# the app's runtime bound read-only as /usr, the app as /app, the installed
+# runtime/app extensions on their declared directories, the GL extension as
+# /run/gl, host /proc /sys /dev /tmp /run/dbus $HOME $XDG_RUNTIME_DIR bound in,
+# then chroot, back to the calling user, exec the app's command. Everything is
+# unmounted with the namespace when the app exits. No sandboxing: the app sees
+# your whole home directory.
+#
+# The chroot skeleton per runtime lives in ~/.local/share/flatpak-chroot/
+# (copied runtime /etc plus your passwd entry); app data goes to
+# ~/.var/app/APPID like with flatpak.
+import configparser
+import os
+import pwd
+import shutil
+import subprocess
+import sys
+
+ARCH = "aarch64"
+KEEP_ENV = ("WAYLAND_DISPLAY", "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS", "LANG", "LC_ALL",
+            "XDG_SESSION_TYPE", "XDG_CURRENT_DESKTOP", "GTK_IM_MODULE", "GDK_SCALE", "GDK_DPI_SCALE")
+
+
+def flatpak_dir(home):
+    return os.path.join(home, ".local/share/flatpak")
+
+
+def read_metadata(path):
+    cp = configparser.ConfigParser(interpolation=None, strict=False)
+    cp.optionxform = str
+    cp.read(path)
+    return cp
+
+
+def ref_files(fp, kind, name, branch):
+    path = os.path.join(fp, kind, name, ARCH, branch, "active/files")
+    return path if os.path.isdir(path) else None
+
+
+def find_ext(fp, name, versions):
+    for v in versions:
+        path = ref_files(fp, "runtime", name, v)
+        if path:
+            return path
+    return None
+
+
+def resolve(home, appid):
+    """Everything to mount for APPID: [(source, path inside chroot)], ld paths, command, runtime id."""
+    fp = flatpak_dir(home)
+    app = ref_files(fp, "app", appid, "current") or ref_files(fp, "app", appid, "stable")
+    if not app:
+        sys.exit(f"lagos-flatpak-run: {appid} not installed (flatpak install --user flathub {appid})")
+    meta = read_metadata(os.path.join(os.path.dirname(app), "metadata"))
+    rname, _, rbranch = meta["Application"]["runtime"].split("/")
+    runtime = ref_files(fp, "runtime", rname, rbranch)
+    if not runtime:
+        sys.exit(f"lagos-flatpak-run: runtime {rname}//{rbranch} not installed")
+    rmeta = read_metadata(os.path.join(os.path.dirname(runtime), "metadata"))
+
+    mounts = [(runtime, "/usr"), (app, "/app")]
+    ld = ["/app/lib"]
+    gl = None
+
+    def extensions(md, base, files, default_branch):
+        nonlocal gl
+        for sect in md.sections():
+            if not sect.startswith("Extension "):
+                continue
+            name = sect.split(" ", 1)[1]
+            ext = md[sect]
+            versions = [v for v in ext.get("versions", "").split(";") if v] or [ext.get("version", default_branch)]
+            if name == "org.freedesktop.Platform.GL":
+                gl = gl or find_ext(fp, "org.freedesktop.Platform.GL.default", versions)
+                continue
+            if ext.get("subdirectories", "false") == "true" or name.endswith((".Debug", ".Locale")):
+                continue
+            src = find_ext(fp, name, versions)
+            target = os.path.join(files, ext["directory"])
+            if src and os.path.isdir(target):
+                mounts.append((src, os.path.join(base, ext["directory"])))
+                if "add-ld-path" in ext:
+                    ld.append(os.path.join(base, ext["directory"], ext["add-ld-path"]))
+
+    extensions(meta, "/app", app, meta["Application"].get("branch", "stable"))
+    extensions(rmeta, "/usr", runtime, rbranch)
+    if gl:
+        ld.append("/run/gl/lib")
+    return mounts, ld, gl, meta["Application"].get("command"), f"{rname}-{rbranch}", runtime
+
+
+def prepare_root(root, runtime, user):
+    """Chroot skeleton owned by the user; /etc is a copy, so the ostree files stay untouched."""
+    for d in ("usr", "app", "proc", "sys", "dev", "tmp", "run/gl", "run/dbus", "run/host/fonts", "var/tmp",
+              user.pw_dir, "etc"):
+        os.makedirs(os.path.join(root, d.lstrip("/")), exist_ok=True)
+    for link in ("bin", "lib", "sbin"):
+        if not os.path.islink(os.path.join(root, link)):
+            os.symlink(f"usr/{link}", os.path.join(root, link))
+    # the runtime's fontconfig includes this to find host fonts (bound at /run/host/fonts)
+    with open(os.path.join(root, "run/host/font-dirs.xml"), "w") as f:
+        f.write('<?xml version="1.0"?>\n<!DOCTYPE fontconfig SYSTEM "fonts.dtd">\n'
+                '<fontconfig><dir>/run/host/fonts</dir></fontconfig>\n')
+    stamp = os.path.join(root, "etc/.runtime")
+    if os.path.exists(stamp) and open(stamp).read() == os.path.realpath(runtime):
+        return
+    shutil.rmtree(os.path.join(root, "etc"))
+    shutil.copytree(os.path.join(runtime, "etc"), os.path.join(root, "etc"), symlinks=True)
+    with open(os.path.join(root, "etc/passwd"), "a") as f:
+        f.write(f"{user.pw_name}:x:{user.pw_uid}:{user.pw_gid}::{user.pw_dir}:/bin/sh\n")
+    with open(os.path.join(root, "etc/group"), "a") as f:
+        f.write(f"{user.pw_name}:x:{user.pw_gid}:\n")
+    for name in ("resolv.conf", "hosts", "localtime", "machine-id"):
+        dst = os.path.join(root, "etc", name)
+        if os.path.lexists(dst):
+            os.remove(dst)
+        if os.path.exists(f"/etc/{name}"):
+            shutil.copy(f"/etc/{name}", dst)
+    with open(stamp, "w") as f:
+        f.write(os.path.realpath(runtime))
+
+
+def mount(*args):
+    subprocess.run(["mount", *args], check=True)
+
+
+def as_root(command, appid, args):
+    uid = int(os.environ["LAGOS_FLATPAK_UID"])
+    user = pwd.getpwuid(uid)
+    mounts, ld, gl, default_cmd, rid, _ = resolve(user.pw_dir, appid)
+    root = os.path.join(user.pw_dir, ".local/share/flatpak-chroot", rid)
+    rt = os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{uid}")
+
+    os.unshare(os.CLONE_NEWNS)
+    mount("--make-rprivate", "/")
+    ro = list(mounts) + ([(gl, "/run/gl")] if gl else [])
+    for src, dst in ro:  # runtime/app/extensions first and read-only: they are ostree's files
+        mount("--bind", src, root + dst)
+        mount("-o", "remount,bind,ro", root + dst)
+    host = [("/proc", "/proc"), ("/sys", "/sys"), ("/dev", "/dev"), ("/tmp", "/tmp"),
+            ("/usr/share/fonts", "/run/host/fonts"), (user.pw_dir, user.pw_dir)]
+    if os.path.isdir("/run/dbus"):
+        host.append(("/run/dbus", "/run/dbus"))
+    os.makedirs(root + rt, exist_ok=True)
+    host.append((rt, rt))
+    for src, dst in host:
+        mount("--rbind", src, root + dst)
+
+    os.chroot(root)
+    os.chdir(user.pw_dir)
+    os.setgroups(os.getgrouplist(user.pw_name, user.pw_gid))
+    os.setgid(user.pw_gid)
+    os.setuid(uid)
+
+    var = os.path.join(user.pw_dir, ".var/app", appid)
+    env = {k: v for k, v in os.environ.items() if k in KEEP_ENV}
+    env.update(HOME=user.pw_dir, USER=user.pw_name, LOGNAME=user.pw_name, SHELL="/bin/sh",
+               PATH="/app/bin:/usr/bin", FLATPAK_ID=appid, container="flatpak",
+               XDG_CONFIG_HOME=f"{var}/config", XDG_DATA_HOME=f"{var}/data", XDG_CACHE_HOME=f"{var}/cache",
+               XDG_DATA_DIRS="/app/share:/usr/share:/usr/share/runtime/share",
+               LD_LIBRARY_PATH=":".join(ld))
+    if gl:
+        env.update(LIBGL_DRIVERS_PATH="/run/gl/lib/dri", GBM_BACKENDS_PATH="/run/gl/lib/gbm",
+                   __EGL_VENDOR_LIBRARY_DIRS="/run/gl/share/glvnd/egl_vendor.d")
+    for d in ("XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME"):
+        os.makedirs(env[d], exist_ok=True)
+    cmd = command or default_cmd
+    if not cmd.startswith("/"):
+        cmd = shutil.which(cmd, path=env["PATH"]) or cmd
+    os.execve(cmd, [cmd, *args], env)
+
+
+def main():
+    argv = sys.argv[1:]
+    command = None
+    if argv and argv[0].startswith("--command="):
+        command = argv.pop(0).split("=", 1)[1]
+    if not argv:
+        sys.exit("usage: lagos-flatpak-run [--command=CMD] APPID [ARGS...]")
+    appid, args = argv[0], argv[1:]
+    if os.getuid() == 0 and "LAGOS_FLATPAK_UID" in os.environ:
+        as_root(command, appid, args)
+    user = pwd.getpwuid(os.getuid())
+    _, _, _, _, rid, runtime = resolve(user.pw_dir, appid)
+    prepare_root(os.path.join(user.pw_dir, ".local/share/flatpak-chroot", rid), runtime, user)
+    os.execvp("sudo", ["sudo", "-n", f"--preserve-env={','.join(KEEP_ENV)}", f"LAGOS_FLATPAK_UID={os.getuid()}",
+                       sys.executable, os.path.realpath(__file__), *sys.argv[1:]])
+
+
+if __name__ == "__main__":
+    main()
