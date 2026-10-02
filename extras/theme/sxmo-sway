@@ -238,6 +238,7 @@ bindsym $mod+r mode "resize"
 
 for_window [app_id="pinentry-.*"] floating true
 for_window [app_id="foot" title=".*sxmo/modem/.*/draft.txt.*"] resize set height 25
+for_window [app_id="kitty" title=".*sxmo/modem/.*/draft.txt.*"] resize set height 25
 for_window [title="megapixels"] inhibit_idle open
 for_window [title="ep[yr].*"] inhibit_idle visible
 

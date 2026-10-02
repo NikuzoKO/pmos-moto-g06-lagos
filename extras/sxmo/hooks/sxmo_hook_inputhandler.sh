@@ -187,7 +187,7 @@ case "$WMCLASS" in
 			*"downrightedge") exit 0 ;;
 		esac
 		;;
-	*"foot"*|*"st"*|*"vte"*|"terminal") # Terminals
+	*"kitty"*|*"foot"*|*"st"*|*"vte"*|"terminal") # Terminals
 		case "$WMCLASS" in # Handle programs without touch support
 			*"st"*)
 				case "$WMNAME" in
