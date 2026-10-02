@@ -1,0 +1,15 @@
+#!/bin/sh
+# lagos-bt-autoconnect: connect the Bluetooth devices listed in
+# ~/.config/lagos/bt-autoconnect ("MAC [name]" per line, # comments) that
+# aren't connected yet. Called from sxmo_hook_unlock.sh, i.e. when the user
+# wakes the phone (not on every cron/alarm wake). The other direction, the
+# device reconnecting when it powers on, needs only `bluetoothctl trust MAC`.
+list=${XDG_CONFIG_HOME:-$HOME/.config}/lagos/bt-autoconnect
+[ -r "$list" ] || exit 0
+bluetoothctl show 2>/dev/null | grep -q 'Powered: yes' || exit 0
+for mac in $(grep -v '^[[:space:]]*#' "$list" | awk '{ print $1 }'); do
+	bluetoothctl info "$mac" 2>/dev/null | grep -q 'Connected: yes' && continue
+	# a powered-off device fails after the page timeout (~5 s)
+	timeout 20 bluetoothctl connect "$mac" > /dev/null 2>&1 &
+done
+wait
