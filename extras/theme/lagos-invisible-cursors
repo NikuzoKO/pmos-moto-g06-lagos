@@ -1,0 +1,26 @@
+#!/usr/bin/env python3
+# lagos-invisible-cursors [DIR]: write the "lagos-invisible" xcursor theme
+# (default DIR: ~/.local/share/icons). Every cursor name Adwaita ships becomes
+# a 1x1 transparent image, so `seat * xcursor_theme lagos-invisible` hides the
+# pointer while keeping pointer focus. (`seat * hide_cursor` clears focus,
+# which breaks lagos-touchscroll's virtual-pointer drag selection in kitty.)
+import os
+import struct
+import sys
+
+out = os.path.join(sys.argv[1] if len(sys.argv) > 1 else os.path.expanduser("~/.local/share/icons"),
+                   "lagos-invisible")
+names = set(os.listdir("/usr/share/icons/Adwaita/cursors")) | {"default", "left_ptr", "text", "xterm", "pointer", "hand2"}
+
+IMAGE, SIZE = 0xFFFD0002, 24
+# header (magic, header len, version, ntoc), one toc entry, one image chunk
+img = struct.pack("<9I", 36, IMAGE, SIZE, 1, 1, 1, 0, 0, 0) + struct.pack("<I", 0)
+data = b"Xcur" + struct.pack("<III", 16, 0x10000, 1) + struct.pack("<III", IMAGE, SIZE, 28) + img
+
+os.makedirs(os.path.join(out, "cursors"), exist_ok=True)
+with open(os.path.join(out, "index.theme"), "w") as f:
+    f.write("[Icon Theme]\nName=lagos-invisible\nComment=transparent cursors for a touch-only phone\n")
+for n in sorted(names):
+    with open(os.path.join(out, "cursors", n), "wb") as f:
+        f.write(data)
+print(f"{len(names)} cursors in {out}")

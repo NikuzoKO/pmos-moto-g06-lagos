@@ -3,20 +3,27 @@
 # (kitty's Wayland backend ignores wl_touch). Reads the touchscreen directly;
 # a one-finger vertical drag that starts inside a visible window of a
 # listed app_id becomes finger-source scroll events on a wlr virtual pointer,
-# ended by axis_stop on release (kitty adds its own momentum).
+# ended by axis_stop on release (kitty adds its own momentum). Holding the
+# finger still for HOLD_MS first selects instead: a short buzz, then left
+# button press + pointer motion until the finger lifts.
 #
 # Wayland and sway IPC are spoken over raw sockets (no pywayland/evdev here).
 
 import json
 import os
 import select
+import signal
 import socket
 import struct
+import subprocess
 import sys
 import time
 
-APPS = {"kitty"}
+APPS = set(os.environ.get("LAGOS_TS_APPS", "kitty").split(","))
 DRAG_START = 10      # logical px of vertical travel before a drag becomes a scroll
+HOLD_MS = 450        # still for this long (within DRAG_START) -> select instead
+BTN_SEL = 0x112      # BTN_MIDDLE: kitty maps it to selection; left belongs to sway's touch emulation
+VIBRATE = os.path.join(os.path.dirname(os.path.realpath(__file__)), "lagos-vibrate")
 SCALE = 1.0          # scroll px per finger px
 
 EV_SYN, EV_KEY, EV_ABS = 0, 1, 3
@@ -160,6 +167,15 @@ class Wl:
         self.send(self.ptr, 3, struct.pack("<IIi", t, 0, int(dy * 256)))  # axis vertical
         self.send(self.ptr, 4)  # frame
 
+    def motion(self, x, y, xext, yext):
+        self.send(self.ptr, 1, struct.pack("<IIIII", now_ms(), x, y, xext, yext))
+        self.send(self.ptr, 4)
+
+    def button(self, pressed):
+        dbg("button", pressed)
+        self.send(self.ptr, 2, struct.pack("<III", now_ms(), BTN_SEL, int(pressed)))
+        self.send(self.ptr, 4)
+
     def stop(self):
         self.send(self.ptr, 5, struct.pack("<I", 1))
         self.send(self.ptr, 6, struct.pack("<II", now_ms(), 0))  # axis_stop
@@ -169,6 +185,7 @@ class Wl:
 # ---- main loop ------------------------------------------------------------
 
 def main():
+    signal.signal(signal.SIGCHLD, signal.SIG_IGN)  # reap lagos-vibrate
     dev = find_touch()
     fd = os.open(dev, os.O_RDONLY)
     xmax, ymax = absmax(fd, ABS_MT_POSITION_X), absmax(fd, ABS_MT_POSITION_Y)
@@ -177,15 +194,26 @@ def main():
     slot, fingers = 0, set()
     x = y = 0
     down = False          # a single finger is on the screen
-    state = None          # None | "candidate" | "scroll" | "ignore"
-    rect = None
-    y0 = ylast = 0
+    state = None          # None | "candidate" | "scroll" | "select" | "ignore"
+    x0 = y0 = ylast = 0
+    t_down = 0.0
     lpx = 1.0             # device units per logical px
 
     while True:
-        r, _, _ = select.select([fd, wl.s], [], [])
+        timeout = None
+        if state == "candidate":
+            timeout = max(0.0, t_down + HOLD_MS / 1000 - time.monotonic())
+        r, _, _ = select.select([fd, wl.s], [], [], timeout)
         if wl.s in r:
             wl.dispatch()
+        if state == "candidate" and time.monotonic() >= t_down + HOLD_MS / 1000:
+            state = "select"
+            try:
+                subprocess.Popen([VIBRATE, "30"])
+            except OSError:
+                pass
+            wl.motion(x, y, xmax, ymax)
+            wl.button(True)
         if fd not in r:
             continue
         data = os.read(fd, 24 * 64)
@@ -216,9 +244,12 @@ def main():
                     if node and node.get("app_id") in APPS:
                         state = "candidate"
                     dbg("down", x, y, node and node.get("app_id"), state)
-                    y0 = ylast = y
+                    x0, y0, ylast = x, y, y
+                    t_down = time.monotonic()
                 elif down and fingers == {0}:
-                    if state == "candidate" and abs(y - y0) / lpx >= DRAG_START:
+                    if state == "candidate" and abs(x - x0) / lpx >= DRAG_START and abs(y - y0) < abs(x - x0):
+                        state = "ignore"  # sideways: not ours
+                    elif state == "candidate" and abs(y - y0) / lpx >= DRAG_START:
                         state = "scroll"
                         ylast = y
                         wl.scroll(x, y, xmax, ymax, 0.0, start=True)
@@ -226,12 +257,16 @@ def main():
                         d = -(y - ylast) / lpx * SCALE
                         ylast = y
                         wl.scroll(0, 0, 0, 0, d)
+                    elif state == "select":
+                        wl.motion(x, y, xmax, ymax)
                 elif down and fingers != {0}:
                     # lifted, or a second finger joined
                     if state == "scroll":
                         # axis_stop: kitty runs its own momentum scroll
                         # (momentum_scroll) from the finger's last velocity
                         wl.stop()
+                    elif state == "select":
+                        wl.button(False)
                     state = "ignore" if fingers else None
                     down = bool(fingers)
 

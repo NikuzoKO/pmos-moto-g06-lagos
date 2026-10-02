@@ -280,6 +280,11 @@ bindswitch lid:off exec sxmo_wm.sh display on
 
 include /etc/sway/config.d/*
 
+# touch-only phone: transparent cursor theme (extras/theme/lagos-invisible-cursors).
+# lagos-touchscroll drives a virtual pointer for kitty scroll/select; hide_cursor
+# would clear pointer focus and break the select drag, so the image is empty instead.
+seat * xcursor_theme lagos-invisible 24
+
 exec 'printf %s "$SWAYSOCK" > "$XDG_RUNTIME_DIR"/sxmo.swaysock'
 
 exec sxmo_hook_start.sh
