@@ -1,0 +1,9 @@
+#!/bin/sh
+# lagos: Alpine's aarch64 kitty 0.48 selects its 128-bit SIMD text decoder
+# (NEON is always assumed on aarch64), finds no implementation compiled in
+# ("No SIMD implementations for this CPU") and exits 1 as soon as the child
+# prints anything, i.e. at the first shell prompt. KITTY_SIMD=0 forces the
+# scalar path, which works. Installed as /usr/local/bin/kitty, which comes
+# before /usr/sbin in PATH.
+export KITTY_SIMD="${KITTY_SIMD:-0}"
+exec /usr/sbin/kitty "$@"
