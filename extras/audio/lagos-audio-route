@@ -1,0 +1,38 @@
+#!/bin/sh
+# lagos-audio-route earpiece|speaker: move the phone's playback between the
+# top earpiece and the bottom loudspeaker. Called by Android Translation Layer
+# (ATL_AUDIO_ROUTE_CMD) when an app enters/leaves a call with the speakerphone
+# off. Both outputs hang off the FS1800 amp: CH1 = earpiece (fed by the MT6358
+# receiver output in the RCV_CH1 scene), CH2 = loudspeaker (headphone outputs
+# in LoudSPK mode, MUSIC scene). The amp has to be off while its scene changes.
+# Needs the audio group (mixer only). The mic route is the same for both.
+set -e
+mixer() {
+	amixer -c0 -q cset name="$1" "$2"
+}
+state=${XDG_RUNTIME_DIR:-/tmp}/lagos-audio-route
+case $1 in
+earpiece)
+	mixer "FSAMP Switch" Off
+	mixer "HPL Mux" "Open"
+	mixer "HPR Mux" "Open"
+	mixer "Ext_Speaker_Amp Switch" off
+	mixer "Handset Volume" 8
+	mixer "RCV Mux" "Voice Playback"
+	mixer "FSAMP Scene" "RCV_CH1"
+	mixer "FSAMP Switch" On
+	;;
+speaker)
+	mixer "FSAMP Switch" Off
+	mixer "RCV Mux" "Open"
+	mixer "FSAMP Scene" "MUSIC"
+	# full speaker route (and the FSAMP Switch back on), same as at boot
+	/usr/sbin/lagos-audio-setup
+	;;
+*)
+	echo "usage: lagos-audio-route earpiece|speaker" >&2
+	exit 1
+	;;
+esac
+echo "$1" > "$state"
+logger -t lagos-audio-route "$1" 2>/dev/null || true
