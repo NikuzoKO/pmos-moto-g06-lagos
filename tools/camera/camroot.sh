@@ -53,8 +53,8 @@ mount -t tmpfs -o mode=755 dev $M/dev
 (cd /dev && find . -xdev \( -type c -o -type b -o -type d -o -type l \) \
 	! -path './pts*' ! -path './shm*' | cpio -pdm $M/dev 2>/dev/null)
 mkdir -p $M/dev/binderfs $M/dev/socket $M/dev/pts
-# mtk-smi-bwc registers a char major but creates no device, so udev makes no node
-mknod -m 666 $M/dev/MTK_SMI c $(awk '$2 == "MTK_SMI" {print $1}' /proc/devices) 0
+# mtk-smi-bwc registers a char major but creates no device (newer udev rules may have made one: then the copy above has it)
+[ -e $M/dev/MTK_SMI ] || mknod -m 666 $M/dev/MTK_SMI c $(awk '$2 == "MTK_SMI" {print $1}' /proc/devices) 0
 mount -t binder binder $M/dev/binderfs
 for dev in binder hwbinder vndbinder; do ln -sf binderfs/$dev $M/dev/$dev; done
 chmod 666 $M/dev/binderfs/*binder
