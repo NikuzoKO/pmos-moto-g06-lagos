@@ -167,7 +167,9 @@ def as_root(command, appid, args):
                XDG_DATA_DIRS="/app/share:/usr/share:/usr/share/runtime/share",
                LD_LIBRARY_PATH=":".join(ld),
                # WebKitGTK sandboxes its web processes with bubblewrap, impossible here (no user ns)
-               WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS="1")
+               WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS="1",
+               # file dialogs through xdg-desktop-portal (phone-sized phrosh chooser) instead of GTK's own
+               GTK_USE_PORTAL="1")
     if gl:
         env.update(LIBGL_DRIVERS_PATH="/run/gl/lib/dri", GBM_BACKENDS_PATH="/run/gl/lib/gbm",
                    __EGL_VENDOR_LIBRARY_DIRS="/run/gl/share/glvnd/egl_vendor.d")
