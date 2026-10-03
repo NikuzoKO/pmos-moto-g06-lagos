@@ -285,6 +285,13 @@ include /etc/sway/config.d/*
 # would clear pointer focus and break the select drag, so the image is empty instead.
 seat * xcursor_theme lagos-invisible 24
 
+# Phosh's file chooser (xdg-desktop-portal phrosh backend) gets no parent window
+# from the apps, so it would tile wherever focus is, often behind the app:
+# float it over everything, nearly full screen, focused.
+for_window [app_id="xdg-desktop-portal-phrosh"] floating enable, resize set width 100 ppt height 90 ppt, move position center, focus
+# Obsidian's vault picker is fixed-size, which sway floats; keep it full screen
+for_window [app_id="md.obsidian.Obsidian"] floating disable
+
 exec 'printf %s "$SWAYSOCK" > "$XDG_RUNTIME_DIR"/sxmo.swaysock'
 
 exec sxmo_hook_start.sh
