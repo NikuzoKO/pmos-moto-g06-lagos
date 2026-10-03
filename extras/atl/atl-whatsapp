@@ -6,6 +6,9 @@
 # service atl-whatsapp).
 export ATL_HAS_TELEPHONY=1
 export ATL_UGLY_ENABLE_CONTACTS=1
+# voice calls and voice notes: ATL denies RECORD_AUDIO without this
+export ATL_UGLY_ENABLE_MICROPHONE=1
+export ATL_CONTACTS_DEBUG=1
 export ATL_BACKGROUND=1
 # WhatsApp's native code makes JNI calls with an exception pending; CheckJNI would abort
 export ATL_CHECKJNI=0
