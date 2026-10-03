@@ -1,0 +1,66 @@
+#!/bin/sh
+# lagos-camera start <camera-id> <width> <height> | stop | status
+# Camera frames for Android Translation Layer (ATL_CAMERA_CMD): makes sure the
+# camroot (camroot.sh) and the stock camera services (camrun.sh) are up, then
+# runs camstream, which writes NV21 preview frames to /run/lagos-cam/frame
+# (see camstream.c for the format). stop releases the camera. Needs sudo -n.
+# camstream log: $XDG_RUNTIME_DIR/lagos-camstream.log
+set -u
+TOOLS=${LAGOS_CAMTOOLS:-$HOME/projects/pmos-moto-g06-lagos/tools/camera}
+M=/var/lib/lagos/camroot/merged
+RUN=/run/lagos-cam
+PIDFILE=$RUN/camstream.pid
+LOG=/var/log/lagos-cam
+
+alive() {
+	[ -f "$1" ] && sudo -n kill -0 "$(cat "$1")" 2>/dev/null
+}
+
+stop() {
+	alive $PIDFILE && sudo -n kill "$(cat $PIDFILE)"
+	sudo -n rm -f $PIDFILE $RUN/frame
+}
+
+case ${1:-} in
+start)
+	id=${2:-0} width=${3:-640} height=${4:-480}
+	stop
+	if ! mountpoint -q $M; then
+		sudo -n sh "$TOOLS/camroot.sh" > /tmp/lagos-camroot.log 2>&1 || { echo "camroot.sh failed, see /tmp/lagos-camroot.log" >&2; exit 1; }
+	fi
+	if ! alive $LOG/cameraserver.pid; then
+		sudo -n sh "$TOOLS/camrun.sh" stop
+		# camrun.sh leaves daemons on its stdout: detach completely
+		sudo -n setsid sh "$TOOLS/camrun.sh" > /tmp/lagos-camrun.log 2>&1 < /dev/null &
+		for i in $(seq 60); do
+			alive $LOG/cameraserver.pid && break
+			sleep 1
+		done
+		sleep 2
+	fi
+	sudo -n mkdir -p $RUN $M/mnt/hostcam
+	sudo -n chmod 755 $RUN
+	mountpoint -q $M/mnt/hostcam || sudo -n mount --bind $RUN $M/mnt/hostcam
+	sudo -n setsid env -i PATH=/system/bin:/vendor/bin LD_PRELOAD=/system/lib64/libpropshim.so \
+		ANDROID_ROOT=/system ANDROID_DATA=/data ANDROID_I18N_ROOT=/apex/com.android.i18n \
+		ANDROID_TZDATA_ROOT=/apex/com.android.tzdata \
+		/usr/sbin/chroot $M /system/bin/camstream "$id" "$width" "$height" /mnt/hostcam/frame \
+		> "${XDG_RUNTIME_DIR:-/tmp}"/lagos-camstream.log 2>&1 < /dev/null &
+	sleep 0.5
+	# the pid that matters is the camstream inside the chroot
+	pid=$(sudo -n sh -c "pgrep -f '^/system/bin/camstream $id ' | tail -1")
+	[ -n "$pid" ] && echo "$pid" | sudo -n tee $PIDFILE > /dev/null
+	logger -t lagos-camera "start camera $id ${width}x$height pid ${pid:-?}" 2>/dev/null || true
+	;;
+stop)
+	stop
+	logger -t lagos-camera stop 2>/dev/null || true
+	;;
+status)
+	alive $PIDFILE && echo "streaming (pid $(cat $PIDFILE))" || echo stopped
+	;;
+*)
+	echo "usage: lagos-camera start <camera-id> <width> <height> | stop | status" >&2
+	exit 1
+	;;
+esac
