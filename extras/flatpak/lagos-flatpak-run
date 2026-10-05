@@ -144,6 +144,15 @@ def as_root(command, appid, args):
     for src, dst in ro:  # runtime/app/extensions first and read-only: they are ostree's files
         mount("--bind", src, root + dst)
         mount("-o", "remount,bind,ro", root + dst)
+    # per-app replacements for files inside the ostree tree, e.g. a newer app/bin/yt-dlp
+    overlay = os.path.join(user.pw_dir, ".local/share/lagos-flatpak", appid, "overlay")
+    for d, _, files in os.walk(overlay):
+        for name in files:
+            src = os.path.join(d, name)
+            dst = root + "/" + os.path.relpath(src, overlay)
+            if os.path.exists(dst):
+                mount("--bind", src, dst)
+                mount("-o", "remount,bind,ro", dst)
     host = [("/proc", "/proc"), ("/sys", "/sys"), ("/dev", "/dev"), ("/tmp", "/tmp"),
             ("/usr/share/fonts", "/run/host/fonts"), (user.pw_dir, user.pw_dir)]
     if os.path.isdir("/run/dbus"):

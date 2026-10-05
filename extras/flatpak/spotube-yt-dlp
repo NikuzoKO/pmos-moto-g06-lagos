@@ -1,0 +1,8 @@
+#!/bin/sh
+# Bound over Spotube's /app/bin/yt-dlp by lagos-flatpak-run (overlay). The
+# bundled yt-dlp is stale and the chroot has no JS runtime, so YouTube's
+# n-challenge stays unsolved and googlevideo answers 403: use a current
+# yt-dlp zipapp plus the official glibc deno build, both kept in $D.
+# Refresh with: spotube-yt-dlp-update
+D=$HOME/.local/share/lagos-flatpak/com.github.KRTirtho.Spotube
+exec /usr/bin/python3 "$D/yt-dlp.zip" --no-update --js-runtimes "deno:$D/deno" "$@"
