@@ -57,7 +57,7 @@ struct bridged_sensor {
 	const char *device;      // /dev/m_*_misc
 	const char *control;     // /sys/class/sensor/m_*_misc/
 	const char *prefix;      // attribute prefix: "acc", "ps"
-	int handle;              // hub sensor handle
+	int handle;              // hub sensor handle (for <prefix>batch)
 	int input;               // uinput device
 	int data;                // sensor device
 	int running;
@@ -228,7 +228,9 @@ static void forward(struct bridged_sensor *sensor,
 		const struct sensor_event *event =
 			(const struct sensor_event *)((const char *)events + offset);
 
-		if (event->handle == sensor->handle && event->flush_action == DATA_ACTION)
+		// each m_*_misc device carries only its own sensor, and the event
+		// handle is not the hub handle (proximity events report 0, not 7)
+		if (event->flush_action == DATA_ACTION)
 			forward_event(sensor->input, event);
 	}
 }
