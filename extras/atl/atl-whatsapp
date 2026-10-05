@@ -10,6 +10,8 @@ export ATL_UGLY_ENABLE_CONTACTS=1
 export ATL_UGLY_ENABLE_MICROPHONE=1
 # calls play on the earpiece unless the speakerphone is on (ATL AudioManager runs this)
 export ATL_AUDIO_ROUTE_CMD="$HOME/.local/bin/lagos-audio-route"
+# camera (QR scan for "Link a device"): frames from the stock camera HAL via lagos-camera
+export ATL_CAMERA_CMD="$HOME/.local/bin/lagos-camera"
 export ATL_CONTACTS_DEBUG=1
 export ATL_BACKGROUND=1
 # WhatsApp's native code makes JNI calls with an exception pending; CheckJNI would abort
