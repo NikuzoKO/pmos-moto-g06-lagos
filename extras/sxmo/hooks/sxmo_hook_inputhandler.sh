@@ -461,12 +461,8 @@ case "$ACTION" in
 		sxmo_brightness.sh down
 		exit 0
 		;;
-	"upleftedge")
-		sxmo_audio.sh vol up
-		exit 0
-		;;
-	"downleftedge")
-		sxmo_audio.sh vol down
+	"upleftedge"|"downleftedge")
+		# No left-edge volume gesture; the volume keys do that
 		exit 0
 		;;
 	"upbottomedge")
