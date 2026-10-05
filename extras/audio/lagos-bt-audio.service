@@ -1,0 +1,7 @@
+[Unit]
+Description=Route media and notification audio to a connected Bluetooth headset
+
+[Service]
+Type=simple
+Restart=always
+ExecStart=/home/nikuzo/.local/bin/lagos-bt-audio

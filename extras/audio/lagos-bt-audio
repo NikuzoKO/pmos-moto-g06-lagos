@@ -1,0 +1,37 @@
+#!/bin/sh
+# lagos-bt-audio: the Media and Notifications loopbacks (60-lagos-channels.conf)
+# are pinned to lagos-speaker with node.dont-reconnect, so a Bluetooth headset
+# never gets their audio. Follow it instead: while a bluez_output sink exists,
+# link both loopback outputs to it; when it goes away, link them back to the
+# speaker. Apps keep playing into lagos-media, so the volume keys still work.
+# The loopbacks refuse pactl move-sink-input and ignore target.object
+# metadata (dont-reconnect), so the ports are relinked with pw-link.
+export XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-/run/user/$(id -u)}
+
+sync() {
+	target=$(pactl list short sinks | awk '$2 ~ /^bluez_output\./ { print $2; exit }')
+	pw-link -i | grep -qx "$target:playback_FL" || target=lagos-speaker
+	links=$(pw-link -l)
+	for out in lagos-media.out lagos-notify.out; do
+		for ch in FL FR; do
+			port=$out:output_$ch
+			echo "$links" | awk -v p="$port" '
+				$0 == p { on = 1; next }
+				on && /^ +\|-> / { print $2; next }
+				{ on = 0 }' |
+			while read -r peer; do
+				[ "$peer" = "$target:playback_$ch" ] || pw-link -d "$port" "$peer"
+			done
+			pw-link "$port" "$target:playback_$ch" 2>/dev/null
+		done
+	done
+}
+
+sync
+pactl subscribe | while read -r line; do
+	case $line in
+	*"'new' on sink #"* | *"'remove' on sink #"* | *"'new' on sink-input #"*)
+		sleep 1  # let the new node's ports appear
+		sync ;;
+	esac
+done
