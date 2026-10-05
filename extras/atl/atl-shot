@@ -1,0 +1,16 @@
+#!/bin/sh
+# Screenshot of an ATL app's window, rendered by ATL itself (grim is black under
+# sway's gles2 renderer). usage: atl-shot <app_id> [out.png]
+app_id=${1:?usage: atl-shot <app_id> [out.png]}
+out=${2:-$HOME/Pictures/atl-$app_id-$(date +%Y%m%d-%H%M%S).png}
+dir=$XDG_RUNTIME_DIR/atl
+pid=$(cat "$dir/$app_id.pid") || exit 1
+rm -f "$dir/$pid.png"
+touch "$dir/$pid.shot"
+kill -USR1 "$pid" || exit 1
+i=0
+while [ ! -s "$dir/$pid.png" ] && [ $i -lt 50 ]; do sleep 0.1; i=$((i + 1)); done
+[ -s "$dir/$pid.png" ] || { rm -f "$dir/$pid.shot"; echo "atl-shot: no screenshot" >&2; exit 1; }
+sleep 0.2
+mkdir -p "${out%/*}"
+mv "$dir/$pid.png" "$out" && echo "$out"
