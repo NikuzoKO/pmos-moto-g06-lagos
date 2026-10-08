@@ -38,6 +38,11 @@ volume_hold() {
 	done
 }
 
+# Power + volume down chord (bonsai tree): screenshot, locked or not
+if [ "$ACTION" = screenshot ]; then
+	exec "$HOME"/.local/bin/lagos-screenshot
+fi
+
 exec 0<<EOF
 $(sxmo_wm.sh focusedwindow -r)
 EOF
@@ -437,20 +442,8 @@ case "$ACTION" in
 		volume_hold up
 		exit
 		;;
-	"rightleftedge")
-		sxmo_wm.sh previousworkspace
-		exit 0
-		;;
-	"leftrightedge")
-		sxmo_wm.sh nextworkspace
-		exit 0
-		;;
-	"twoleft")
-		sxmo_wm.sh movepreviousworkspace
-		exit 0
-		;;
-	"tworight")
-		sxmo_wm.sh movenextworkspace
+	"rightleftedge"|"leftrightedge"|"twoleft"|"tworight")
+		# No workspace-switching gestures (apps are switched from the nav bar)
 		exit 0
 		;;
 	"righttopedge")

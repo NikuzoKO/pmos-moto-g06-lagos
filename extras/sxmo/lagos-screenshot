@@ -1,0 +1,14 @@
+#!/bin/sh
+# Screenshot of the whole output to ~/Pictures/Screenshots (power + volume down)
+export XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-/run/user/$(id -u)}
+export WAYLAND_DISPLAY=${WAYLAND_DISPLAY:-wayland-1}
+dir=$HOME/Pictures/Screenshots
+mkdir -p "$dir"
+out=$dir/Screenshot_$(date +%Y%m%d-%H%M%S).png
+if grim "$out"; then
+	"$HOME"/.local/bin/lagos-vibrate 60 2>/dev/null
+	dunstify -a screenshot -t 2500 "Screenshot saved" "$out" 2>/dev/null
+else
+	dunstify -a screenshot -u critical "Screenshot failed" 2>/dev/null
+	exit 1
+fi

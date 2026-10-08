@@ -2,7 +2,7 @@
 maintainer=""
 pkgname=device-motorola-lagos
 pkgver=1
-pkgrel=31
+pkgrel=32
 pkgdesc="Motorola Moto G06"
 url="https://postmarketos.org"
 arch="aarch64"
@@ -16,6 +16,10 @@ depends="
 	iptables
 	iptables-legacy
 	iw
+	ntfs-3g
+	ntfs-3g-progs
+	udisks2
+	udiskie
 	"
 makedepends="devicepkg-dev"
 backup="etc/lagos-modem.conf"
