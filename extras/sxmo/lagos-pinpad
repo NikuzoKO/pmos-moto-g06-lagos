@@ -1,0 +1,314 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: MIT
+# SIM PIN screen for sxmo on sway: a full-screen layer-shell numpad that shows
+# up at session start, waits for the modem, and exits as soon as the SIM no
+# longer needs a PIN. The PIN is never stored; it goes straight to
+# `mmcli -i <sim> --pin=...`. No Skip button: it only closes on unlock, on a PUK-locked SIM
+# (after a message), or when no modem/SIM shows up.
+#
+#   lagos-pinpad          real modem
+#   lagos-pinpad --demo   fake modem (PIN 0000, 3 tries), for looking at the UI
+#
+# Exit 0 = unlocked / nothing to do, 1 = gave up.
+
+import faulthandler
+import os
+import re
+import subprocess
+import sys
+
+import gi
+
+gi.require_version("Gtk", "3.0")
+gi.require_version("Gdk", "3.0")
+gi.require_version("GtkLayerShell", "0.1")
+from gi.repository import Gdk, GLib, Gtk, GtkLayerShell  # noqa: E402
+
+DEMO = "--demo" in sys.argv
+MIN_DIGITS = 4
+MAX_DIGITS = 8
+KEY_SIZE = 72  # logical px, keys are circles
+POLL_S = 2
+# no modem / no SIM after this long: stop covering the screen
+GIVE_UP_S = 150
+DEMO_PIN = "0000"
+
+# Rosé Pine, matching the launcher and bars
+CSS = """
+window.pinpad { background-color: #191724; }
+.title { color: #e0def4; font-size: 15pt; }
+.status { color: #908caa; font-size: 10pt; }
+.status.error { color: #eb6f92; }
+.warning { color: #f6c177; font-size: 9pt; }
+.dots { color: #c4a7e7; font-size: 13pt; letter-spacing: 4px; }
+button.key { background: rgba(38, 35, 58, 0.78); color: #e0def4; border: none; box-shadow: none;
+    border-radius: 999px; font-size: 20pt; padding: 0; min-height: 0; min-width: 0; }
+button.key:active { background: rgba(64, 61, 82, 0.9); }
+button.key.ok { background: #c4a7e7; color: #191724; font-size: 12pt; }
+button.key.ok:disabled { background: #26233a; color: #6e6a86; }
+button.key.back { color: #eb6f92; font-size: 16pt; }
+"""
+
+
+WALLPAPER = os.path.expanduser("~/.local/share/sxmo/background.jpg")  # what sxmo_bg.sh's swaybg draws
+
+
+def wallpaper_css():
+    # same picture as the desktop, scaled like swaybg's `-m fill`, under a dim scrim
+    if not os.path.exists(WALLPAPER):
+        return ""
+    return ("window.pinpad { background-image: linear-gradient(rgba(25, 23, 36, 0.45), rgba(25, 23, 36, 0.45)), "
+            f"url('{WALLPAPER}'); background-size: cover; background-position: center; }}")
+
+
+def run(command):
+    result = subprocess.run(command, capture_output=True, text=True, timeout=30)
+    return result.returncode, (result.stdout + result.stderr).strip()
+
+
+def modem_state():
+    """-> (kind, detail). kind: none | pin | puk | open | other."""
+    if DEMO:
+        return "pin", {"sim": "demo", "retries": demo_retries[0]}
+    code, out = run(["mmcli", "-m", "any", "-K"])
+    if code != 0:
+        return "none", {}
+    fields = {}
+    for line in out.splitlines():
+        key, _, value = line.partition(":")
+        fields[key.strip()] = value.strip()
+    unlock = fields.get("modem.generic.unlock-required", "--")
+    sim = fields.get("modem.generic.sim", "--")
+    state = fields.get("modem.generic.state", "")
+    if unlock == "sim-pin":
+        retries = 3
+        for key, value in fields.items():
+            if key.startswith("modem.generic.unlock-retries.value"):
+                match = re.match(r"sim-pin \((\d+)\)", value)
+                if match:
+                    retries = int(match.group(1))
+        return "pin", {"sim": sim, "retries": retries}
+    if unlock == "sim-puk":
+        return "puk", {}
+    if state in ("failed", "initializing", "unknown", "disabled", "enabling") and sim == "--":
+        return "none", {}
+    return "open", {}
+
+
+demo_retries = [3]
+
+
+def submit_pin(sim, pin):
+    """-> (ok, message)"""
+    if DEMO:
+        if pin == DEMO_PIN:
+            return True, ""
+        demo_retries[0] -= 1
+        return False, "incorrect"
+    code, out = run(["mmcli", "-i", sim, f"--pin={pin}"])
+    return code == 0, out
+
+
+class PinPad(Gtk.Window):
+    def __init__(self):
+        super().__init__()
+        self.get_style_context().add_class("pinpad")
+        GtkLayerShell.init_for_window(self)
+        GtkLayerShell.set_namespace(self, "lagos-pinpad")
+        GtkLayerShell.set_layer(self, GtkLayerShell.Layer.OVERLAY)
+        for edge in (GtkLayerShell.Edge.TOP, GtkLayerShell.Edge.BOTTOM,
+                     GtkLayerShell.Edge.LEFT, GtkLayerShell.Edge.RIGHT):
+            GtkLayerShell.set_anchor(self, edge, True)
+        GtkLayerShell.set_exclusive_zone(self, -1)  # cover the bars too
+        GtkLayerShell.set_keyboard_mode(self, GtkLayerShell.KeyboardMode.ON_DEMAND)
+
+        self.digits = ""
+        self.sim = None
+        self.busy = False
+        self.waited = 0
+        self.result = 1
+
+        # overlay: the warning floats over the bottom edge and never affects the numpad's layout
+        root = Gtk.Overlay()
+        self.add(root)
+        outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        outer.set_valign(Gtk.Align.CENTER)
+        outer.set_halign(Gtk.Align.CENTER)
+        root.add(outer)
+
+        # long warnings live at the bottom of the screen, wrapped, not in the status line
+        self.warning = Gtk.Label(label="")
+        self.warning.get_style_context().add_class("warning")
+        self.warning.set_line_wrap(True)
+        self.warning.set_justify(Gtk.Justification.CENTER)
+        self.warning.set_max_width_chars(34)
+        self.warning.set_margin_bottom(32)
+        self.warning.set_margin_start(24)
+        self.warning.set_margin_end(24)
+        self.warning.set_halign(Gtk.Align.CENTER)
+        self.warning.set_valign(Gtk.Align.END)
+        root.add_overlay(self.warning)
+        root.set_overlay_pass_through(self.warning, True)
+
+        title = Gtk.Label(label="SIM PIN")
+        title.get_style_context().add_class("title")
+        outer.pack_start(title, False, False, 0)
+
+        self.status = Gtk.Label(label="Waiting for the modem…")
+        self.status.get_style_context().add_class("status")
+        outer.pack_start(self.status, False, False, 0)
+
+        self.dots = Gtk.Label(label=" ")
+        self.dots.get_style_context().add_class("dots")
+        self.dots.set_margin_top(6)
+        self.dots.set_margin_bottom(10)
+        outer.pack_start(self.dots, False, False, 0)
+
+        grid = Gtk.Grid(row_spacing=10, column_spacing=10)
+        grid.set_halign(Gtk.Align.CENTER)
+        outer.pack_start(grid, False, False, 0)
+        for index, label in enumerate("123456789"):
+            grid.attach(self.key(label, self.on_digit), index % 3, index // 3, 1, 1)
+        back = self.key("⌫", self.on_back)
+        back.get_style_context().add_class("back")
+        grid.attach(back, 0, 3, 1, 1)
+        grid.attach(self.key("0", self.on_digit), 1, 3, 1, 1)
+        self.ok = self.key("OK", self.on_ok)
+        self.ok.get_style_context().add_class("ok")
+        self.ok.set_sensitive(False)
+        grid.attach(self.ok, 2, 3, 1, 1)
+
+        self.connect("key-press-event", self.on_key)
+        self.set_keys_enabled(False)
+        GLib.timeout_add_seconds(POLL_S, self.poll)
+        GLib.idle_add(lambda: self.poll() and False)  # once now; the timer repeats it
+
+    def key(self, label, handler):
+        button = Gtk.Button(label=label)
+        button.get_style_context().add_class("key")
+        button.set_can_focus(False)
+        # exact square so the 999px radius gives a circle; CENTER stops the grid stretching it
+        button.set_size_request(KEY_SIZE, KEY_SIZE)
+        button.set_halign(Gtk.Align.CENTER)
+        button.set_valign(Gtk.Align.CENTER)
+        button.connect("clicked", handler)
+        return button
+
+    def set_keys_enabled(self, enabled):
+        self.keys_enabled = enabled
+        self.ok.set_sensitive(enabled and len(self.digits) >= MIN_DIGITS)
+
+    def refresh_dots(self):
+        self.dots.set_text("● " * len(self.digits) if self.digits else " ")
+        self.ok.set_sensitive(self.keys_enabled and len(self.digits) >= MIN_DIGITS)
+
+    def set_status(self, text, error=False):
+        self.status.set_text(text)
+        context = self.status.get_style_context()
+        if error:
+            context.add_class("error")
+        else:
+            context.remove_class("error")
+
+    def on_digit(self, button):
+        if self.keys_enabled and len(self.digits) < MAX_DIGITS:
+            self.digits += button.get_label()
+            self.refresh_dots()
+
+    def on_back(self, _button):
+        if self.keys_enabled:
+            self.digits = self.digits[:-1]
+            self.refresh_dots()
+
+    def on_key(self, _window, event):
+        name = Gdk.keyval_name(event.keyval) or ""
+        if name.isdigit() and len(name) == 1 and self.keys_enabled and len(self.digits) < MAX_DIGITS:
+            self.digits += name
+            self.refresh_dots()
+        elif name == "BackSpace":
+            self.on_back(None)
+        elif name in ("Return", "KP_Enter"):
+            self.on_ok(None)
+        return True
+
+    def on_ok(self, _button):
+        if not self.keys_enabled or self.busy or len(self.digits) < MIN_DIGITS or not self.sim:
+            return
+        pin, self.digits = self.digits, ""
+        self.refresh_dots()
+        self.busy = True
+        self.set_keys_enabled(False)
+        self.set_status("Checking…")
+        # off the main loop: mmcli can take a few seconds
+        GLib.Thread.new(None, self.submit_worker, pin)
+
+    def submit_worker(self, pin):
+        ok, message = submit_pin(self.sim, pin)
+        GLib.idle_add(self.on_submitted, ok, message)
+
+    def on_submitted(self, ok, message):
+        self.busy = False
+        if ok:
+            self.set_status("Unlocked")
+            GLib.timeout_add(400, self.finish, 0)
+        else:
+            self.poll()  # re-reads the retry counter
+            self.set_status("Wrong PIN", error=True)
+        return False
+
+    def poll(self):
+        if self.busy:
+            return True
+        self.waited += POLL_S
+        try:
+            kind, detail = modem_state()
+        except (subprocess.SubprocessError, OSError):
+            kind, detail = "none", {}
+        if kind == "open":
+            if self.waited > POLL_S + 1:
+                self.set_status("Unlocked")
+            self.finish(0)
+            return False
+        if kind == "pin":
+            self.sim = detail["sim"]
+            retries = detail["retries"]
+            self.set_keys_enabled(True)
+            note = f"{retries} tries left"
+            error = self.status.get_style_context().has_class("error")
+            self.set_status(f"Wrong PIN · {note}" if error else f"Enter PIN · {note}", error=error)
+            self.warning.set_text("Careful: after the last try the SIM is locked and needs its PUK code."
+                                  if retries <= 2 else "")
+        elif kind == "puk":
+            self.set_keys_enabled(False)
+            self.set_status("SIM is PUK-locked", error=True)
+            self.warning.set_text("It needs its PUK code. Enter it in another phone, or ask your carrier.")
+            GLib.timeout_add_seconds(6, self.finish, 1)  # no way to enter a PUK here, don't trap the screen
+        else:
+            self.set_keys_enabled(False)
+            self.set_status("Waiting for the modem…")
+            if self.waited >= GIVE_UP_S:
+                self.finish(1)
+                return False
+        return True
+
+    def finish(self, code):
+        print(f"lagos-pinpad: finish({code}) after {self.waited}s", file=sys.stderr, flush=True)
+        self.result = code
+        Gtk.main_quit()
+        return False
+
+
+def main():
+    provider = Gtk.CssProvider()
+    provider.load_from_data((CSS + wallpaper_css()).encode())
+    Gtk.StyleContext.add_provider_for_screen(
+        Gdk.Screen.get_default(), provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+    faulthandler.enable()
+    window = PinPad()
+    window.show_all()
+    Gtk.main()
+    sys.exit(window.result)
+
+
+if __name__ == "__main__":
+    main()
