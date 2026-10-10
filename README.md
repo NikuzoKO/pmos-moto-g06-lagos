@@ -20,13 +20,14 @@ Galaxy A31's "Helio P65").
 | Touch | ✅ Chipone ICNL9916X TDDI, survives panel off/on |
 | Audio | ✅ Bottom speaker, main mic (PipeWire); earpiece works by hand, not routed yet; headset jack only notifies |
 | WiFi / Bluetooth | ✅ Both, with open replacements for the Android WMT daemons (`lagos-wmt`); BlueZ A2DP |
-| Modem | ✅ Boots with stock `ccci_mdinit`/`ccci_rpcd` in a chroot; ModemManager (patched) sees it. Calls/SMS/data untested (no SIM yet) |
+| Modem | ✅ Boots with stock `ccci_mdinit`/`ccci_rpcd` in a chroot; ModemManager (patched) sees it. SIM registers on the network, SMS received; mobile data brought up by hand (see `tools/at-probe.py`). SIM PIN entry screen at boot: `extras/sxmo/lagos-pinpad` |
 | Battery | ✅ Percentage via stock `fuelgauged`; upower |
 | Suspend | ✅ Deep sleep under sxmo, WiFi stays associated (Wake-on-WLAN + firmware suspend mode), wakes on the power key |
 | Lock screen | ✅ peanutbutter with a visible pattern mode (`pmaports/peanutbutter`) |
 | Sensors | ✅ Accelerometer (rotation) and proximity via `lagos-sensord` → iio-sensor-proxy. No gyro/compass on this model; light not exposed yet |
 | Firewall, zram | ✅ pmOS rules on legacy iptables (no nf_tables in the stock kernel); zram swap |
-| Not yet | GPU, camera, fingerprint, calls/SMS/data (needs a SIM) |
+| Android apps | ✅ **Official WhatsApp runs natively through Android Translation Layer** (no Waydroid/container): register, restore backup, notifications in the background, voice notes, QR linking. Write-up: [`docs/ATL-WHATSAPP.md`](docs/ATL-WHATSAPP.md) |
+| Not yet | Full GPU acceleration, fingerprint, calls |
 | Watchdog | ✅ Fed by stock `mtk_wdt.ko` (no more resets) |
 | Known failed units | None |
 
@@ -285,3 +286,14 @@ Extract them from your own device.
 - Galaxy A31 (MT6768) postmarketOS port: same SoC family.
 - `device-xiaomi-lancelot` (Redmi 9, MT6769T): mainline port on
   `linux-postmarketos-mediatek-mt6768` (pmaports MR !7292).
+
+## Credits
+
+Built by [NikuzoKO](https://github.com/NikuzoKO) together with
+**[Claude](https://claude.com/claude-code) (Anthropic), used through Claude Code**
+as the AI engineering tool for reverse engineering, debugging, patches and
+documentation across this project.
+
+Standing on: postmarketOS, sxmo, [Android Translation Layer](https://gitlab.com/android_translation_layer/android_translation_layer)
+and [bionic_translation](https://gitlab.com/android_translation_layer/bionic_translation),
+Motorola's published kernel and connectivity sources, and the XDA unlock-tool authors.
