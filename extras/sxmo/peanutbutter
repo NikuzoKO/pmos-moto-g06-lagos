@@ -2,6 +2,18 @@
 # sxmo starts peanutbutter without options or a passcode: use the pattern
 # lock (swipe through a 3x3 grid of dots, 1 = top-left, 9 = bottom-right)
 # and read the passcode from ~/.config/sxmo/peanutbutter-passcode.
+#
+# Claudio build (~/projects/peanutbutter-claudio): blurred wallpaper (--background) and the
+# assistant card drawn above the lock. Falls back to the stock binary if it is missing, so
+# rollback = rm ~/.local/lib/claudio/peanutbutter
 PEANUTBUTTER_PASSCODE="$(cat "$HOME/.config/sxmo/peanutbutter-passcode" 2>/dev/null)"
 export PEANUTBUTTER_PASSCODE
+claudio="$HOME/.local/lib/claudio/peanutbutter"
+background="$HOME/.local/share/sxmo/lockbg.png"
+if [ -x "$claudio" ]; then
+	if [ -r "$background" ]; then
+		exec "$claudio" -P --background "$background" "$@"
+	fi
+	exec "$claudio" -P "$@"
+fi
 exec /usr/bin/peanutbutter -P "$@"

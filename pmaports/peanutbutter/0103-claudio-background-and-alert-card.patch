@@ -1,0 +1,1032 @@
+diff --git a/Cargo.toml b/Cargo.toml
+index 111311d..199a9da 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -8,7 +8,7 @@ edition = "2021"
+ [dependencies]
+ memfd = "0.6.4"
+ wayland-client = "0.31.1"
+-cairo-rs = "0.20.4"
++cairo-rs = { version = "0.20.4", features = ["png"] }
+ pango = "0.20.4"
+ pangocairo = "0.20.4"
+ wayland-protocols = { version = "0.31.0", features = ["client", "unstable", "staging"] }
+diff --git a/src/alert.rs b/src/alert.rs
+new file mode 100644
+index 0000000..833228c
+--- /dev/null
++++ b/src/alert.rs
+@@ -0,0 +1,432 @@
++// Claudio alert card: an assistant (running as the same user) can ask the lock screen to show a
++// card with a title, a message and up to four answer buttons, without unlocking the phone.
++//
++// Request file  $XDG_RUNTIME_DIR/claudio-alert/request  (key=value lines):
++//     title=Time to start
++//     message=Put 5 dishes in the sink
++//     button=started|Starting now
++//     button=snooze5|Not yet - 5 more min
++// Answer file   $XDG_RUNTIME_DIR/claudio-alert/answer   (the id of the tapped button)
++//
++// The card can never unlock the session. A stale or malformed request can never trap the user
++// either: see `accept_file` (age, owner, size) and `parse` (at least one button, capped fields).
++
++use std::fs;
++use std::io::Write;
++use std::os::unix::fs::MetadataExt;
++use std::path::{Path, PathBuf};
++use std::time::{Duration, SystemTime};
++
++use cairo;
++use pangocairo;
++
++use crate::draw::{set_color, BASE, IRIS, OVERLAY, SURFACE, TEXT};
++
++pub const MAX_AGE: Duration = Duration::from_secs(15 * 60);
++const MAX_FILE_SIZE: u64 = 4096;
++const MAX_TITLE: usize = 80;
++const MAX_MESSAGE: usize = 300;
++const MAX_BUTTONS: usize = 4;
++const MAX_ID: usize = 32;
++const MAX_LABEL: usize = 40;
++
++#[derive(Clone, Debug, PartialEq)]
++pub struct AlertRequest {
++    pub title: String,
++    pub message: String,
++    pub buttons: Vec<(String, String)>, // (id, label)
++}
++
++fn clean(text: &str, max_chars: usize) -> String {
++    text.chars()
++        .filter(|character| !character.is_control())
++        .take(max_chars)
++        .collect::<String>()
++        .trim()
++        .to_string()
++}
++
++fn valid_id(id: &str) -> bool {
++    !id.is_empty()
++        && id.len() <= MAX_ID
++        && id
++            .chars()
++            .all(|character| character.is_ascii_alphanumeric() || character == '_' || character == '-')
++}
++
++/// Parse a request. Needs at least one valid button, so a card can always be dismissed.
++pub fn parse(text: &str) -> Option<AlertRequest> {
++    let mut title = String::new();
++    let mut message = String::new();
++    let mut buttons: Vec<(String, String)> = Vec::new();
++    for line in text.lines() {
++        let Some((key, value)) = line.split_once('=') else {
++            continue;
++        };
++        match key.trim() {
++            "title" => title = clean(value, MAX_TITLE),
++            "message" => message = clean(value, MAX_MESSAGE),
++            "button" => {
++                let Some((id, label)) = value.split_once('|') else {
++                    continue;
++                };
++                let (id, label) = (id.trim(), clean(label, MAX_LABEL));
++                if valid_id(id) && !label.is_empty() && buttons.len() < MAX_BUTTONS {
++                    buttons.push((id.to_string(), label));
++                }
++            }
++            _ => {}
++        }
++    }
++    if buttons.is_empty() {
++        return None;
++    }
++    Some(AlertRequest {
++        title,
++        message,
++        buttons,
++    })
++}
++
++/// Is a request file we may trust? Regular file, ours, small, and recent.
++pub fn accept_file(
++    is_regular_file: bool,
++    file_uid: u32,
++    my_uid: u32,
++    size: u64,
++    modified: SystemTime,
++    now: SystemTime,
++) -> bool {
++    if !is_regular_file || file_uid != my_uid || size == 0 || size > MAX_FILE_SIZE {
++        return false;
++    }
++    match now.duration_since(modified) {
++        Ok(age) => age <= MAX_AGE,
++        // modified in the future (clock jump): allow a minute of slack, no more
++        Err(error) => error.duration() <= Duration::from_secs(60),
++    }
++}
++
++/// Is the alert directory ours and not writable by anyone else?
++pub fn accept_dir(is_dir: bool, dir_uid: u32, my_uid: u32, mode: u32) -> bool {
++    is_dir && dir_uid == my_uid && mode & 0o022 == 0
++}
++
++pub fn alert_dir() -> Option<PathBuf> {
++    let runtime = std::env::var_os("XDG_RUNTIME_DIR")?;
++    Some(PathBuf::from(runtime).join("claudio-alert"))
++}
++
++/// Cheap identity of the request file, to notice when it changed
++pub type Signature = (SystemTime, u64);
++
++/// Read the current request, if there is a trustworthy one. Returns its signature too.
++pub fn load(dir: &Path, now: SystemTime) -> Option<(AlertRequest, Signature)> {
++    let my_uid = unsafe { libc::getuid() };
++    let dir_metadata = fs::symlink_metadata(dir).ok()?;
++    if !accept_dir(
++        dir_metadata.is_dir(),
++        dir_metadata.uid(),
++        my_uid,
++        dir_metadata.mode(),
++    ) {
++        return None;
++    }
++    let path = dir.join("request");
++    let metadata = fs::symlink_metadata(&path).ok()?; // symlink_metadata: never follow links
++    let modified = metadata.modified().ok()?;
++    if !accept_file(
++        metadata.is_file(),
++        metadata.uid(),
++        my_uid,
++        metadata.len(),
++        modified,
++        now,
++    ) {
++        return None;
++    }
++    let text = fs::read_to_string(&path).ok()?;
++    Some((parse(&text)?, (modified, metadata.len())))
++}
++
++#[derive(Clone, Copy, Debug, Default, PartialEq)]
++pub struct Rect {
++    pub x: f64,
++    pub y: f64,
++    pub w: f64,
++    pub h: f64,
++}
++
++impl Rect {
++    pub fn contains(&self, x: f64, y: f64) -> bool {
++        x >= self.x && x <= self.x + self.w && y >= self.y && y <= self.y + self.h
++    }
++}
++
++const PADDING: f64 = 20.0;
++const TITLE_HEIGHT: f64 = 44.0;
++const MESSAGE_HEIGHT: f64 = 100.0;
++const BUTTON_HEIGHT: f64 = 56.0;
++const BUTTON_GAP: f64 = 12.0;
++
++/// A request plus where it sits on screen (logical coordinates, like touch events)
++#[derive(Clone, Debug)]
++pub struct AlertView {
++    pub request: AlertRequest,
++    pub signature: Option<Signature>,
++    card: Rect,
++    buttons: Vec<Rect>,
++}
++
++impl AlertView {
++    pub fn new(request: AlertRequest, signature: Option<Signature>) -> Self {
++        Self {
++            request,
++            signature,
++            card: Rect::default(),
++            buttons: Vec::new(),
++        }
++    }
++
++    /// Fixed geometry (no text measuring), so hit-testing never depends on a drawn frame
++    pub fn layout(&mut self, width: i32, height: i32) {
++        let (width, height) = (width as f64, height as f64);
++        let count = self.request.buttons.len() as f64;
++        let card_width = width * 0.88;
++        let card_height = PADDING
++            + TITLE_HEIGHT
++            + MESSAGE_HEIGHT
++            + count * BUTTON_HEIGHT
++            + (count - 1.0) * BUTTON_GAP
++            + PADDING;
++        self.card = Rect {
++            x: (width - card_width) / 2.0,
++            y: height * 0.36,
++            w: card_width,
++            h: card_height,
++        };
++        let first_button_y = self.card.y + PADDING + TITLE_HEIGHT + MESSAGE_HEIGHT;
++        self.buttons = (0..self.request.buttons.len())
++            .map(|index| Rect {
++                x: self.card.x + PADDING,
++                y: first_button_y + index as f64 * (BUTTON_HEIGHT + BUTTON_GAP),
++                w: self.card.w - 2.0 * PADDING,
++                h: BUTTON_HEIGHT,
++            })
++            .collect();
++    }
++
++    pub fn hit(&self, x: f64, y: f64) -> Option<usize> {
++        self.buttons.iter().position(|button| button.contains(x, y))
++    }
++
++    pub fn id_of(&self, index: usize) -> Option<&str> {
++        self.request
++            .buttons
++            .get(index)
++            .map(|(id, _label)| id.as_str())
++    }
++
++    pub fn draw(&self, context: &cairo::Context, base_font: &pango::FontDescription, scale: i32) {
++        let scale = scale as f64;
++        if self.buttons.is_empty() {
++            return;
++        }
++
++        // dim everything behind the card
++        context.set_source_rgba(BASE.0, BASE.1, BASE.2, 0.55);
++        context.paint().unwrap();
++
++        let card = self.card;
++        rounded_rect(context, card.x * scale, card.y * scale, card.w * scale, card.h * scale, 22.0 * scale);
++        context.set_source_rgba(SURFACE.0, SURFACE.1, SURFACE.2, 0.96);
++        context.fill().unwrap();
++
++        let inner_width = (card.w - 2.0 * PADDING) * scale;
++        let text_x = (card.x + PADDING) * scale;
++
++        let mut title_font = base_font.clone();
++        title_font.set_size((22.0 * scale * pango::SCALE as f64) as i32);
++        title_font.set_weight(pango::Weight::Bold);
++        let layout = pangocairo::functions::create_layout(context);
++        layout.set_font_description(Some(&title_font));
++        layout.set_text(&self.request.title);
++        layout.set_width((inner_width * pango::SCALE as f64) as i32);
++        layout.set_ellipsize(pango::EllipsizeMode::End);
++        layout.set_alignment(pango::Alignment::Center);
++        set_color(context, IRIS);
++        context.move_to(text_x, (card.y + PADDING) * scale);
++        pangocairo::functions::show_layout(context, &layout);
++
++        let mut message_font = base_font.clone();
++        message_font.set_size((16.0 * scale * pango::SCALE as f64) as i32);
++        let layout = pangocairo::functions::create_layout(context);
++        layout.set_font_description(Some(&message_font));
++        layout.set_text(&self.request.message);
++        layout.set_width((inner_width * pango::SCALE as f64) as i32);
++        layout.set_height(-3); // at most 3 lines
++        layout.set_wrap(pango::WrapMode::WordChar);
++        layout.set_ellipsize(pango::EllipsizeMode::End);
++        layout.set_alignment(pango::Alignment::Center);
++        set_color(context, TEXT);
++        context.move_to(text_x, (card.y + PADDING + TITLE_HEIGHT) * scale);
++        pangocairo::functions::show_layout(context, &layout);
++
++        let mut button_font = base_font.clone();
++        button_font.set_size((18.0 * scale * pango::SCALE as f64) as i32);
++        for (index, (button, (_id, label))) in self
++            .buttons
++            .iter()
++            .zip(self.request.buttons.iter())
++            .enumerate()
++        {
++            rounded_rect(
++                context,
++                button.x * scale,
++                button.y * scale,
++                button.w * scale,
++                button.h * scale,
++                16.0 * scale,
++            );
++            set_color(context, if index == 0 { IRIS } else { OVERLAY });
++            context.fill().unwrap();
++
++            let layout = pangocairo::functions::create_layout(context);
++            layout.set_font_description(Some(&button_font));
++            layout.set_text(label);
++            layout.set_width(((button.w - 16.0) * scale * pango::SCALE as f64) as i32);
++            layout.set_ellipsize(pango::EllipsizeMode::End);
++            layout.set_alignment(pango::Alignment::Center);
++            let (_, text_height) = layout.pixel_size();
++            set_color(context, if index == 0 { BASE } else { TEXT });
++            context.move_to(
++                (button.x + 8.0) * scale,
++                button.y * scale + (button.h * scale - text_height as f64) / 2.0,
++            );
++            pangocairo::functions::show_layout(context, &layout);
++        }
++    }
++}
++
++fn rounded_rect(context: &cairo::Context, x: f64, y: f64, w: f64, h: f64, radius: f64) {
++    let tau = std::f64::consts::TAU;
++    context.new_sub_path();
++    context.arc(x + w - radius, y + radius, radius, -tau / 4.0, 0.0);
++    context.arc(x + w - radius, y + h - radius, radius, 0.0, tau / 4.0);
++    context.arc(x + radius, y + h - radius, radius, tau / 4.0, tau / 2.0);
++    context.arc(x + radius, y + radius, radius, tau / 2.0, tau * 3.0 / 4.0);
++    context.close_path();
++}
++
++/// Record the answer (atomically) and remove the request. Never touches the lock.
++pub fn answer(dir: &Path, id: &str) -> std::io::Result<()> {
++    let result = (|| {
++        let temporary = dir.join("answer.tmp");
++        let mut file = fs::File::create(&temporary)?;
++        file.write_all(id.as_bytes())?;
++        file.sync_all()?;
++        fs::rename(&temporary, dir.join("answer"))
++    })();
++    // Even if the answer could not be recorded, the request goes away: a card must never come
++    // back every second and trap the touch input.
++    let _ = fs::remove_file(dir.join("request"));
++    result
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    fn good() -> &'static str {
++        "title=Time to start\nmessage=Dishes\nbutton=started|Starting now\nbutton=skipped|Skip today\n"
++    }
++
++    #[test]
++    fn parses_a_normal_request() {
++        let request = parse(good()).unwrap();
++        assert_eq!(request.title, "Time to start");
++        assert_eq!(request.buttons.len(), 2);
++        assert_eq!(request.buttons[0], ("started".into(), "Starting now".into()));
++    }
++
++    #[test]
++    fn no_valid_button_means_no_card() {
++        assert!(parse("title=x\nmessage=y\n").is_none());
++        assert!(parse("button=bad id|Label\n").is_none()); // space in id
++        assert!(parse("button=ok|\n").is_none()); // empty label
++        assert!(parse("button=|Label\n").is_none()); // empty id
++    }
++
++    #[test]
++    fn caps_fields_and_strips_control_characters() {
++        let long = "x".repeat(1000);
++        let request = parse(&format!(
++            "title={long}\nmessage=a\u{1b}[31mb\u{7}c\nbutton=a|{long}\n"
++        ))
++        .unwrap();
++        assert_eq!(request.title.chars().count(), MAX_TITLE);
++        assert_eq!(request.message, "a[31mbc");
++        assert_eq!(request.buttons[0].1.chars().count(), MAX_LABEL);
++    }
++
++    #[test]
++    fn at_most_four_buttons() {
++        let text: String = (0..9).map(|n| format!("button=b{n}|B{n}\n")).collect();
++        assert_eq!(parse(&text).unwrap().buttons.len(), MAX_BUTTONS);
++    }
++
++    #[test]
++    fn rejects_stale_foreign_huge_or_odd_files() {
++        let now = SystemTime::now();
++        let recent = now - Duration::from_secs(30);
++        assert!(accept_file(true, 1000, 1000, 100, recent, now));
++        assert!(!accept_file(true, 1000, 1000, 100, now - MAX_AGE - Duration::from_secs(1), now)); // stale
++        assert!(!accept_file(true, 0, 1000, 100, recent, now)); // someone else's
++        assert!(!accept_file(true, 1000, 1000, MAX_FILE_SIZE + 1, recent, now)); // huge
++        assert!(!accept_file(true, 1000, 1000, 0, recent, now)); // empty
++        assert!(!accept_file(false, 1000, 1000, 100, recent, now)); // symlink/dir/device
++        assert!(!accept_file(true, 1000, 1000, 100, now + Duration::from_secs(3600), now)); // future
++    }
++
++    #[test]
++    fn dir_must_be_ours_and_private() {
++        assert!(accept_dir(true, 1000, 1000, 0o700));
++        assert!(accept_dir(true, 1000, 1000, 0o755));
++        assert!(!accept_dir(true, 1000, 1000, 0o775)); // group-writable
++        assert!(!accept_dir(true, 1000, 1000, 0o777));
++        assert!(!accept_dir(true, 0, 1000, 0o700));
++        assert!(!accept_dir(false, 1000, 1000, 0o700));
++    }
++
++    #[test]
++    fn hit_testing_matches_layout() {
++        let mut view = AlertView::new(parse(good()).unwrap(), None);
++        view.layout(360, 820);
++        let first = view.buttons[0];
++        let second = view.buttons[1];
++        assert_eq!(view.hit(first.x + 5.0, first.y + 5.0), Some(0));
++        assert_eq!(view.hit(second.x + 5.0, second.y + 5.0), Some(1));
++        assert_eq!(view.hit(1.0, 1.0), None); // outside the card: no button, no unlock
++        assert_eq!(view.id_of(1), Some("skipped"));
++        assert_eq!(view.id_of(2), None);
++    }
++
++    #[test]
++    fn card_fits_the_screen_with_four_buttons() {
++        let text: String = (0..4).map(|n| format!("button=b{n}|B{n}\n")).collect();
++        let mut view = AlertView::new(parse(&text).unwrap(), None);
++        view.layout(360, 820);
++        assert!(view.card.y + view.card.h < 820.0);
++    }
++
++    #[test]
++    fn answer_is_written_and_request_removed() {
++        let dir = std::env::temp_dir().join(format!("pb-alert-test-{}", std::process::id()));
++        fs::create_dir_all(&dir).unwrap();
++        fs::write(dir.join("request"), good()).unwrap();
++        answer(&dir, "started").unwrap();
++        assert_eq!(fs::read_to_string(dir.join("answer")).unwrap(), "started");
++        assert!(!dir.join("request").exists());
++        fs::remove_dir_all(&dir).unwrap();
++    }
++}
+diff --git a/src/draw.rs b/src/draw.rs
+index 4d996e6..80c917d 100644
+--- a/src/draw.rs
++++ b/src/draw.rs
+@@ -8,18 +8,170 @@ use std::os::fd::AsFd;
+ 
+ use wayland_client::protocol::wl_shm;
+ 
++use crate::alert::AlertView;
++use crate::pattern::PatternState;
+ use crate::wayland_protocol::State;
+ 
+ // Rosé Pine (https://rosepinetheme.com)
+-const BASE: (f64, f64, f64) = (0x19 as f64 / 255.0, 0x17 as f64 / 255.0, 0x24 as f64 / 255.0);
+-const TEXT: (f64, f64, f64) = (0xe0 as f64 / 255.0, 0xde as f64 / 255.0, 0xf4 as f64 / 255.0);
+-const IRIS: (f64, f64, f64) = (0xc4 as f64 / 255.0, 0xa7 as f64 / 255.0, 0xe7 as f64 / 255.0);
+-const LOVE: (f64, f64, f64) = (0xeb as f64 / 255.0, 0x6f as f64 / 255.0, 0x92 as f64 / 255.0);
++pub const BASE: (f64, f64, f64) = (0x19 as f64 / 255.0, 0x17 as f64 / 255.0, 0x24 as f64 / 255.0);
++pub const SURFACE: (f64, f64, f64) = (0x1f as f64 / 255.0, 0x1d as f64 / 255.0, 0x2e as f64 / 255.0);
++pub const OVERLAY: (f64, f64, f64) = (0x26 as f64 / 255.0, 0x23 as f64 / 255.0, 0x3a as f64 / 255.0);
++pub const TEXT: (f64, f64, f64) = (0xe0 as f64 / 255.0, 0xde as f64 / 255.0, 0xf4 as f64 / 255.0);
++pub const IRIS: (f64, f64, f64) = (0xc4 as f64 / 255.0, 0xa7 as f64 / 255.0, 0xe7 as f64 / 255.0);
++pub const LOVE: (f64, f64, f64) = (0xeb as f64 / 255.0, 0x6f as f64 / 255.0, 0x92 as f64 / 255.0);
+ 
+-fn set_color(context: &cairo::Context, (red, green, blue): (f64, f64, f64)) {
++pub fn set_color(context: &cairo::Context, (red, green, blue): (f64, f64, f64)) {
+     context.set_source_rgb(red, green, blue);
+ }
+ 
++/// Everything one frame needs, so it can be rendered without a Wayland connection
++/// (the real lock and the offscreen `--preview` share this).
++pub struct Frame<'a> {
++    pub width: i32,  // buffer pixels
++    pub height: i32, // buffer pixels
++    pub scale: i32,
++    pub fontdesc_time: &'a pango::FontDescription,
++    pub fontdesc_status: &'a pango::FontDescription,
++    pub status: &'a str,
++    pub time: chrono::DateTime<chrono::Local>,
++    pub inverted: bool,
++    pub permalocked: bool,
++    pub has_pattern_mode: bool,
++    pub pattern: Option<&'a PatternState>,
++    pub background: Option<&'a cairo::ImageSurface>,
++    pub alert: Option<&'a AlertView>,
++}
++
++pub fn render(context: &cairo::Context, frame: &Frame) {
++    let (init_w, init_h) = (frame.width, frame.height);
++    let scale = frame.scale;
++
++    if frame.permalocked {
++        set_color(context, LOVE);
++        context.paint().unwrap();
++    } else if frame.inverted {
++        set_color(context, TEXT);
++        context.paint().unwrap();
++    } else if let Some(background) = frame.background {
++        paint_cover(context, background, init_w, init_h);
++    } else {
++        set_color(context, BASE);
++        context.paint().unwrap();
++    }
++    if frame.inverted {
++        set_color(context, BASE);
++    } else {
++        set_color(context, TEXT);
++    }
++
++    // draw status line
++    let layout = pangocairo::functions::create_layout(context);
++    layout.set_font_description(Some(frame.fontdesc_status));
++    layout.set_markup(frame.status);
++    let (layout_w, _) = layout.pixel_size();
++    context.move_to(
++        (init_w as f64 / 2.0) - (layout_w as f64 / 2.0),
++        (50 * scale) as f64,
++    );
++    pangocairo::functions::show_layout(context, &layout);
++
++    //draw time
++    let timestring = frame.time.format("%H:%M").to_string();
++    let layout = pangocairo::functions::create_layout(context);
++    layout.set_font_description(Some(frame.fontdesc_time));
++    layout.set_text(&timestring);
++    let (layout_w, layout_h) = layout.pixel_size();
++    // in pattern mode the dots take the lower part of the screen
++    let time_center_y = if frame.has_pattern_mode {
++        init_h as f64 * 0.28
++    } else {
++        init_h as f64 / 2.0
++    };
++    context.move_to(
++        (init_w as f64 / 2.0) - (layout_w as f64 / 2.0),
++        time_center_y - (layout_h as f64 / 2.0),
++    );
++    pangocairo::functions::show_layout(context, &layout);
++
++    //draw date below the time
++    let mut fontdesc_date = frame.fontdesc_status.clone();
++    fontdesc_date.set_size(22 * pango::SCALE * scale);
++    let date_layout = pangocairo::functions::create_layout(context);
++    date_layout.set_font_description(Some(&fontdesc_date));
++    date_layout.set_text(&frame.time.format("%A, %-d %B").to_string());
++    let (date_w, _) = date_layout.pixel_size();
++    context.move_to(
++        (init_w as f64 / 2.0) - (date_w as f64 / 2.0),
++        time_center_y + (layout_h as f64 / 2.0) + (8 * scale) as f64,
++    );
++    pangocairo::functions::show_layout(context, &date_layout);
++
++    if let Some(alert) = frame.alert {
++        // the card replaces the pattern: touches go to its buttons only
++        alert.draw(context, frame.fontdesc_status, scale);
++    } else if !frame.permalocked {
++        draw_pattern(context, frame.pattern, scale);
++    }
++}
++
++/// Paint `image` scaled (and centre-cropped) to cover the whole buffer. A PNG that already has the
++/// buffer's exact size (what tools/make-lockbg.sh produces) is a plain copy.
++fn paint_cover(context: &cairo::Context, image: &cairo::ImageSurface, width: i32, height: i32) {
++    let (image_w, image_h) = (image.width() as f64, image.height() as f64);
++    let factor = (width as f64 / image_w).max(height as f64 / image_h);
++    let offset_x = (width as f64 - image_w * factor) / 2.0;
++    let offset_y = (height as f64 - image_h * factor) / 2.0;
++    context.save().unwrap();
++    context.translate(offset_x, offset_y);
++    context.scale(factor, factor);
++    context.set_source_surface(image, 0.0, 0.0).unwrap();
++    context.paint().unwrap();
++    context.restore().unwrap();
++}
++
++/// Dots, the path swiped so far and a line to the finger (all in surface
++/// coordinates, scaled to the buffer)
++fn draw_pattern(context: &cairo::Context, pattern: Option<&PatternState>, scale: i32) {
++    let Some(pattern) = pattern else {
++        return;
++    };
++    let scale = scale as f64;
++    let spacing = pattern.spacing() * scale;
++    if pattern.failed() {
++        set_color(context, LOVE);
++    } else {
++        set_color(context, IRIS);
++    }
++
++    let points = pattern.path_points();
++    if !points.is_empty() {
++        context.set_line_width(spacing * 0.035);
++        context.set_line_cap(cairo::LineCap::Round);
++        context.set_line_join(cairo::LineJoin::Round);
++        context.move_to(points[0].0 * scale, points[0].1 * scale);
++        for (x, y) in points.iter().skip(1) {
++            context.line_to(x * scale, y * scale);
++        }
++        if let Some((x, y)) = pattern.finger() {
++            context.line_to(x * scale, y * scale);
++        }
++        context.stroke().unwrap();
++    }
++
++    for (index, (x, y)) in pattern.dots().iter().enumerate() {
++        let (x, y) = (x * scale, y * scale);
++        context.new_sub_path();
++        context.arc(x, y, spacing * 0.05, 0.0, std::f64::consts::TAU);
++        context.fill().unwrap();
++        if pattern.is_visited(index) {
++            context.set_line_width(spacing * 0.02);
++            context.new_sub_path();
++            context.arc(x, y, spacing * 0.16, 0.0, std::f64::consts::TAU);
++            context.stroke().unwrap();
++        }
++    }
++}
++
+ impl State {
+     pub fn draw(&mut self) {
+         if self.debug {
+@@ -50,59 +202,34 @@ impl State {
+         let context = cairo::Context::new(&surface).unwrap();
+         let permalocked = self.touch_state.as_ref().is_some_and(|state| state.permalocked())
+             || self.pattern.as_ref().is_some_and(|pattern| pattern.permalocked());
+-        if permalocked {
+-            set_color(&context, LOVE);
+-        } else if self.inverted {
+-            set_color(&context, TEXT);
+-        } else {
+-            set_color(&context, BASE);
+-        }
+-        // paint background colour
+-        context.paint().unwrap();
+-        if self.inverted {
+-            set_color(&context, BASE);
+-        } else {
+-            set_color(&context, TEXT);
+-        }
+ 
+-        // draw status line
+-        let status = self.status.lock().expect("status unlock must work");
+-        let layout = pangocairo::functions::create_layout(&context);
+-        layout.set_font_description(Some(&self.fontdesc_status));
+-        layout.set_markup(&status);
+-        let (layout_w, _) = layout.pixel_size();
+-        context.move_to(
+-            (init_w as f64 / 2.0) - (layout_w as f64 / 2.0),
+-            (50 * self.scale) as f64,
+-        );
+-        pangocairo::functions::show_layout(&context, &layout);
+-
+-        // hash the statusline so we can check if it changes later
+-        let mut h = DefaultHasher::new();
+-        status.hash(&mut h);
+-        self.statushash = Some(h.finish());
+-
+-        //draw time
+-        self.time = Some(chrono::Local::now());
+-        let timestring = self.time.as_ref().unwrap().format("%H:%M").to_string();
+-        let layout = pangocairo::functions::create_layout(&context);
+-        layout.set_font_description(Some(&self.fontdesc_time));
+-        layout.set_text(&timestring);
+-        let (layout_w, layout_h) = layout.pixel_size();
+-        // in pattern mode the dots take the lower part of the screen
+-        let time_center_y = if self.pattern.is_some() {
+-            init_h as f64 * 0.28
+-        } else {
+-            init_h as f64 / 2.0
+-        };
+-        context.move_to(
+-            (init_w as f64 / 2.0) - (layout_w as f64 / 2.0),
+-            time_center_y - (layout_h as f64 / 2.0),
+-        );
+-        pangocairo::functions::show_layout(&context, &layout);
++        {
++            let status = self.status.lock().expect("status unlock must work");
++            // hash the statusline so we can check if it changes later
++            let mut h = DefaultHasher::new();
++            status.hash(&mut h);
++            self.statushash = Some(h.finish());
+ 
+-        if !permalocked {
+-            self.draw_pattern(&context);
++            self.time = Some(chrono::Local::now());
++            if let Some(alert) = self.alert.as_mut() {
++                alert.layout(self.width.unwrap(), self.height.unwrap());
++            }
++            let frame = Frame {
++                width: init_w,
++                height: init_h,
++                scale: self.scale,
++                fontdesc_time: &self.fontdesc_time,
++                fontdesc_status: &self.fontdesc_status,
++                status: &status,
++                time: self.time.unwrap(),
++                inverted: self.inverted,
++                permalocked,
++                has_pattern_mode: self.pattern.is_some(),
++                pattern: self.pattern.as_ref(),
++                background: self.background.as_ref(),
++                alert: self.alert.as_ref(),
++            };
++            render(&context, &frame);
+         }
+ 
+         drop(context);
+@@ -140,47 +267,4 @@ impl State {
+ 
+         pool.destroy();
+     }
+-
+-    /// Dots, the path swiped so far and a line to the finger (all in surface
+-    /// coordinates, scaled to the buffer)
+-    fn draw_pattern(&self, context: &cairo::Context) {
+-        let Some(pattern) = self.pattern.as_ref() else {
+-            return;
+-        };
+-        let scale = self.scale as f64;
+-        let spacing = pattern.spacing() * scale;
+-        if pattern.failed() {
+-            set_color(context, LOVE);
+-        } else {
+-            set_color(context, IRIS);
+-        }
+-
+-        let points = pattern.path_points();
+-        if !points.is_empty() {
+-            context.set_line_width(spacing * 0.035);
+-            context.set_line_cap(cairo::LineCap::Round);
+-            context.set_line_join(cairo::LineJoin::Round);
+-            context.move_to(points[0].0 * scale, points[0].1 * scale);
+-            for (x, y) in points.iter().skip(1) {
+-                context.line_to(x * scale, y * scale);
+-            }
+-            if let Some((x, y)) = pattern.finger() {
+-                context.line_to(x * scale, y * scale);
+-            }
+-            context.stroke().unwrap();
+-        }
+-
+-        for (index, (x, y)) in pattern.dots().iter().enumerate() {
+-            let (x, y) = (x * scale, y * scale);
+-            context.new_sub_path();
+-            context.arc(x, y, spacing * 0.05, 0.0, std::f64::consts::TAU);
+-            context.fill().unwrap();
+-            if pattern.is_visited(index) {
+-                context.set_line_width(spacing * 0.02);
+-                context.new_sub_path();
+-                context.arc(x, y, spacing * 0.16, 0.0, std::f64::consts::TAU);
+-                context.stroke().unwrap();
+-            }
+-        }
+-    }
+ }
+diff --git a/src/main.rs b/src/main.rs
+index 72350b0..61400cd 100644
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -4,9 +4,11 @@ use std::process::{Command, Stdio};
+ use std::sync::{Arc, Mutex};
+ use std::{env, thread, time};
+ 
++mod alert;
+ mod draw;
+ mod poller;
+ mod wayland_protocol;
++use alert::AlertView;
+ use chrono::Timelike;
+ use poller::Poller;
+ use wayland_protocol::init_wayland;
+@@ -24,6 +26,63 @@ enum ParseArg {
+     StatusCommand,
+     Tries,
+     DeepLockTime,
++    Background,
++    PreviewOut,
++    PreviewAlert,
++}
++
++/// Render one frame to a PNG without Wayland and without locking anything, to check layouts.
++fn preview(
++    out: &str,
++    fontname: &str,
++    pattern_mode: bool,
++    background: Option<&cairo::ImageSurface>,
++    alert_file: Option<&str>,
++) {
++    let (logical_w, logical_h, scale) = (360, 820, 2);
++    let mut fontdesc_time = pango::FontDescription::new();
++    fontdesc_time.set_family(fontname);
++    fontdesc_time.set_size(60 * pango::SCALE * scale);
++    let mut fontdesc_status = pango::FontDescription::new();
++    fontdesc_status.set_family(fontname);
++    fontdesc_status.set_size(16 * pango::SCALE * scale);
++
++    let mut view = alert_file.map(|path| {
++        let text = std::fs::read_to_string(path).expect("cannot read the --preview-alert file");
++        let request = alert::parse(&text).expect("the --preview-alert file has no valid button");
++        let mut view = AlertView::new(request, None);
++        view.layout(logical_w, logical_h);
++        view
++    });
++    let pattern = pattern_mode.then(|| PatternState::new(logical_w, logical_h, Some("14789"), 10));
++
++    let (width, height) = (logical_w * scale, logical_h * scale);
++    let surface = cairo::ImageSurface::create(cairo::Format::ARgb32, width, height).unwrap();
++    let context = cairo::Context::new(&surface).unwrap();
++    let frame = draw::Frame {
++        width,
++        height,
++        scale,
++        fontdesc_time: &fontdesc_time,
++        fontdesc_status: &fontdesc_status,
++        status: "preview",
++        time: chrono::Local::now(),
++        inverted: false,
++        permalocked: false,
++        has_pattern_mode: pattern.is_some(),
++        pattern: pattern.as_ref(),
++        background,
++        alert: view.as_mut().map(|view| &*view),
++    };
++    draw::render(&context, &frame);
++    drop(context);
++    let mut file = std::fs::File::create(out).expect("cannot create the preview file");
++    surface.write_to_png(&mut file).expect("cannot write the preview png");
++}
++
++fn load_background(path: &str) -> Option<cairo::ImageSurface> {
++    let mut file = std::fs::File::open(path).ok()?;
++    cairo::ImageSurface::create_from_png(&mut file).ok()
+ }
+ 
+ // The main function of our program
+@@ -39,8 +98,14 @@ fn main() {
+     let mut deeplocktime = time::Duration::from_secs(20);
+     let mut paranoid = false;
+     let mut fontname: String = "Sans".into();
++    let mut background_path: Option<String> = None;
++    let mut preview_out: Option<String> = None;
++    let mut preview_alert: Option<String> = None;
+     for argument in env::args().skip(1) {
+         match argument.as_str() {
++            "--background" => parsearg = ParseArg::Background,
++            "--preview" => parsearg = ParseArg::PreviewOut,
++            "--preview-alert" => parsearg = ParseArg::PreviewAlert,
+             "-d" | "--debug" => debug = true,
+             "-T" | "--notouch" => notouch = true,
+             "-F" | "--nofeedback" => nofeedback = true,
+@@ -67,6 +132,9 @@ fn main() {
+                 eprintln!(" -f / --font [font               Set font family");
+                 eprintln!(" -t / --tries [tries]                 The number of incorrect touches allowed before the locker goes into a deeper lock (0 = unlimited, default = {})", tries);
+                 eprintln!(" -L / --deeplock [seconds]            Timeout in seconds for deeplock mode, during which the device can not be unlocked. (default = {})", deeplocktime.as_secs());
++                eprintln!(" --background [file.png]            Draw this PNG (cover-scaled) as the lock screen background; make it blurred and darkened beforehand (tools/make-lockbg.sh)");
++                eprintln!(" --preview [out.png]                 Render one frame to a PNG and exit, without locking anything");
++                eprintln!(" --preview-alert [file]              With --preview: also draw the alert card from this request file");
+                 eprintln!(" -p / --paranoid                      In paranoid mode, the deeplock timeout will be doubled every time it is reached, making successive attempts harder and harder.");
+                 eprintln!(" -1                              1x1 touch grid (insecure)");
+                 eprintln!(
+@@ -89,6 +157,18 @@ fn main() {
+                 std::process::exit(0);
+             }
+             _ => match parsearg {
++                ParseArg::Background => {
++                    background_path = Some(argument);
++                    parsearg = ParseArg::None;
++                }
++                ParseArg::PreviewOut => {
++                    preview_out = Some(argument);
++                    parsearg = ParseArg::None;
++                }
++                ParseArg::PreviewAlert => {
++                    preview_alert = Some(argument);
++                    parsearg = ParseArg::None;
++                }
+                 ParseArg::Font => {
+                     fontname = argument;
+                     parsearg = ParseArg::None;
+@@ -116,6 +196,19 @@ fn main() {
+         }
+     }
+ 
++    let background = background_path.as_deref().and_then(|path| {
++        let image = load_background(path);
++        if image.is_none() {
++            eprintln!("[peanutbutter] cannot load background {path}: using the plain colour");
++        }
++        image
++    });
++
++    if let Some(out) = preview_out.as_deref() {
++        preview(out, &fontname, pattern_mode, background.as_ref(), preview_alert.as_deref());
++        return;
++    }
++
+     let status: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
+ 
+     if let Some(statuscommand) = statuscommand {
+@@ -168,6 +261,8 @@ fn main() {
+     let wait_between_polling = time::Duration::from_millis(250);
+     let mut reset_touchstate: Option<chrono::DateTime<chrono::Local>> = None;
+ 
++    way_state.background = background;
++    let alert_dir = alert::alert_dir();
+     way_state.draw(); //initial frame
+     way_state.lock();
+     let mut previous_down: Option<TouchDown> = None;
+@@ -261,6 +356,26 @@ fn main() {
+                 if time_changed || status_changed {
+                     way_state.redraw = true;
+                 }
++                // assistant card: show / update / hide following the request file
++                if let Some(dir) = alert_dir.as_ref() {
++                    match alert::load(dir, std::time::SystemTime::now()) {
++                        Some((request, signature)) => {
++                            let unchanged = way_state
++                                .alert
++                                .as_ref()
++                                .is_some_and(|view| view.signature == Some(signature));
++                            if !unchanged {
++                                way_state.alert = Some(AlertView::new(request, Some(signature)));
++                                way_state.redraw = true;
++                            }
++                        }
++                        None => {
++                            if way_state.alert.take().is_some() {
++                                way_state.redraw = true;
++                            }
++                        }
++                    }
++                }
+                 if let Some(clear_time) = clear_pattern_at.as_ref() {
+                     if time >= *clear_time {
+                         if let Some(pattern) = way_state.pattern.as_mut() {
+@@ -272,6 +387,21 @@ fn main() {
+                 }
+             }
+ 
++            if let Some(index) = way_state.alert_pick.take() {
++                if let (Some(alert), Some(dir)) = (way_state.alert.as_ref(), alert_dir.as_ref()) {
++                    if let Some(id) = alert.id_of(index) {
++                        if way_state.debug {
++                            eprintln!("alert answered: {id}");
++                        }
++                        if let Err(error) = alert::answer(dir, id) {
++                            eprintln!("[peanutbutter] cannot record the alert answer: {error}");
++                        }
++                    }
++                }
++                way_state.alert = None;
++                way_state.redraw = true;
++            }
++
+             if let Some(outcome) = way_state.pattern_outcome.take() {
+                 match outcome {
+                     Outcome::Valid => {
+diff --git a/src/wayland_protocol.rs b/src/wayland_protocol.rs
+index 4835647..e9de969 100644
+--- a/src/wayland_protocol.rs
++++ b/src/wayland_protocol.rs
+@@ -30,6 +30,7 @@ use wayland_client::protocol::wl_keyboard;
+ use wayland_client::protocol::wl_shm;
+ use wayland_client::protocol::wl_shm_pool;
+ 
++use crate::alert::AlertView;
+ use crate::pattern::{Outcome, PatternState};
+ use crate::touch_pass::TouchState;
+ use chrono::{DateTime, Local};
+@@ -75,6 +76,10 @@ pub struct State {
+     pub touch_state: Option<TouchState>,
+     pub pattern: Option<PatternState>, // pattern mode, replaces touch_state
+     pub pattern_outcome: Option<Outcome>, // set when a pattern is completed
++    pub background: Option<cairo::ImageSurface>, // pre-blurred wallpaper (--background)
++    pub alert: Option<AlertView>,         // assistant card shown above the lock, see alert.rs
++    pub alert_pick: Option<usize>,        // button index tapped on the card, handled by main
++    alert_touch: Option<(f64, f64)>,      // where the finger is while a card is shown
+     pub status: Arc<Mutex<String>>,
+     pub statushash: Option<u64>, //hash of last status
+     pub time: Option<DateTime<Local>>,
+@@ -217,6 +222,21 @@ impl Dispatch<wl_touch::WlTouch, ()> for State {
+         _: &Connection,
+         _qh: &QueueHandle<Self>,
+     ) {
++        // While a card is shown, touches only reach its buttons: nothing here can unlock.
++        if state.alert.is_some() {
++            match event {
++                wl_touch::Event::Down { x, y, .. } | wl_touch::Event::Motion { x, y, .. } => {
++                    state.alert_touch = Some((x, y));
++                }
++                wl_touch::Event::Up { .. } => {
++                    if let (Some((x, y)), Some(alert)) = (state.alert_touch.take(), &state.alert) {
++                        state.alert_pick = alert.hit(x, y);
++                    }
++                }
++                _ => {}
++            }
++            return;
++        }
+         match event {
+             wl_touch::Event::Down { serial, x, y, .. } => {
+                 if let Some(pattern) = state.pattern.as_mut() {
+@@ -377,6 +397,10 @@ pub fn init_wayland(
+         touch_state: None,
+         pattern: None,
+         pattern_outcome: None,
++        background: None,
++        alert: None,
++        alert_pick: None,
++        alert_touch: None,
+         status,
+         statushash: None,
+         time: None,
+@@ -523,7 +547,7 @@ impl Dispatch<wl_output::WlOutput, ()> for State {
+                     eprintln!("wloutput scaling factor = {factor}");
+                 }
+                 state.scale = factor;
+-                state.fontdesc_time.set_size(80 * pango::SCALE * factor);
++                state.fontdesc_time.set_size(60 * pango::SCALE * factor);
+                 state.fontdesc_status.set_size(16 * pango::SCALE * factor);
+             }
+             _ => {}
