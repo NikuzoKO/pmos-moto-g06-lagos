@@ -18,7 +18,7 @@ alive() {
 
 stop() {
 	alive $PIDFILE && sudo -n kill "$(cat $PIDFILE)"
-	sudo -n rm -f $PIDFILE $RUN/frame
+	sudo -n rm -f $PIDFILE $RUN/frame $RUN/frame.ctl $RUN/frame.ev
 }
 
 case ${1:-} in
