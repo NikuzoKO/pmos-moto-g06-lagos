@@ -1,0 +1,62 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: MIT
+# Photo clean-up for lagos-pro-camera (OpenCV):
+#   lagos-photo-enhance <in.jpg> [out.jpg]       denoise, local contrast, sharpen
+#       (default out = <in>_enh.jpg)
+#   lagos-photo-enhance --hdr <out.jpg> a.jpg b.jpg c.jpg   align + Mertens fusion
+# Pixels are kept in the sensor's orientation; EXIF (incl. Orientation) is copied
+# over from the source with exiftool.
+import subprocess
+import sys
+
+import cv2
+import numpy as np
+
+QUALITY = 95
+
+
+def read(path):
+    image = cv2.imread(path, cv2.IMREAD_COLOR | cv2.IMREAD_IGNORE_ORIENTATION)
+    if image is None:
+        sys.exit(f"can't read {path}")
+    return image
+
+
+def write(image, path, source):
+    cv2.imwrite(path, image, [cv2.IMWRITE_JPEG_QUALITY, QUALITY])
+    subprocess.run(["exiftool", "-TagsFromFile", source, "-all:all", "-overwrite_original", path],
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def enhance(image):
+    # chroma noise is the loud part in dark phone shots: strong on colour, light on luma
+    image = cv2.fastNlMeansDenoisingColored(image, None, 3, 7, 5, 15)
+    lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB)
+    l, a, b = cv2.split(lab)
+    l = cv2.createCLAHE(clipLimit=1.6, tileGridSize=(8, 8)).apply(l)
+    image = cv2.cvtColor(cv2.merge([l, a, b]), cv2.COLOR_LAB2BGR)
+    blur = cv2.GaussianBlur(image, (0, 0), 2.0)
+    return cv2.addWeighted(image, 1.45, blur, -0.45, 0)
+
+
+def hdr(out, paths):
+    images = [read(p) for p in paths]
+    cv2.createAlignMTB().process(images, images)
+    fused = cv2.createMergeMertens().process(images)
+    fused = np.clip(fused * 255, 0, 255).astype(np.uint8)
+    write(fused, out, paths[len(paths) // 2])
+
+
+def main():
+    args = sys.argv[1:]
+    if args and args[0] == "--hdr" and len(args) >= 4:
+        hdr(args[1], args[2:])
+    elif args and not args[0].startswith("-"):
+        src = args[0]
+        out = args[1] if len(args) > 1 else src.rsplit(".", 1)[0] + "_enh.jpg"
+        write(enhance(read(src)), out, src)
+    else:
+        sys.exit(__doc__)
+
+
+main()

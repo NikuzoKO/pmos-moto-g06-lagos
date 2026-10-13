@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Camera
+Comment=Pro camera: manual shutter, ISO, focus, guides, HDR, long exposure
+Exec=lagos-pro-camera
+Icon=camera-photo
+Categories=Graphics;Photography;
+StartupWMClass=lagos-pro-camera
