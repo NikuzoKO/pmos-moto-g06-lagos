@@ -56,10 +56,14 @@ WB_PRESETS = [("Auto", 1), ("Incand.", 2), ("Fluor.", 3), ("Warm fl.", 4), ("Day
 GRIDS = ["off", "thirds", "phi", "diagonal", "centre", "1:1", "16:9", "3:2"]
 MODES = ["Photo", "Timer", "Burst", "Long", "HDR"]
 TIMERS = [3, 10]
+FLASH_NAMES = ["off", "auto", "on", "torch"]
+ZOOM_STEPS = [1, 2, 4, 6]
+MAX_ZOOM = {0: 6.0, 1: 2.0}
 BURST_COUNT = 5
 
 CSS = """
 window.cam, window.cam box { background: #191724; }
+.cam box.zoombox { background: transparent; }
 .cam button { background: #26233a; color: #e0def4; border: none; box-shadow: none;
     border-radius: 14px; padding: 2px 4px; min-height: 0; min-width: 0; text-shadow: none; }
 .cam button:active { background: #403d52; }
@@ -74,6 +78,9 @@ window.cam, window.cam box { background: #191724; }
 .cam button.shutter.busy { background: #eb6f92; box-shadow: 0 0 0 3px #eb6f92; }
 .cam button.side { background: #26233a; border-radius: 26px; min-width: 52px; min-height: 52px; }
 .cam button.side.on { background: #c4a7e7; }
+.cam button.float { background: rgba(25,23,36,0.72); border-radius: 15px; font-size: 9pt; padding: 3px 9px; min-height: 22px; }
+.cam button.float.on { background: #f6c177; }
+.cam button.float.on label { color: #191724; }
 .cam label { color: #e0def4; }
 .cam label.muted { color: #908caa; font-size: 9pt; }
 .cam scale trough { background: #26233a; min-height: 6px; border-radius: 3px; }
@@ -133,6 +140,8 @@ class Settings:
         self.enhance = False
         self.mode = 0
         self.timer = 0               # index into TIMERS
+        self.zoom = 1.0
+        self.flash = 0               # 0 off, 1 auto, 2 on, 3 torch (rear only)
 
     def load(self):
         try:
@@ -406,6 +415,10 @@ class Viewfinder(Gtk.DrawingArea):
         if s.camera == 1:
             focus = "FF"
         text += f"   f/{1.8 if s.camera == 0 else 2.0}   {focus}"
+        if s.zoom > 1.01:
+            text += f"   {s.zoom:.1f}×"
+        if s.camera == 0 and s.flash:
+            text += f"   FLASH {FLASH_NAMES[s.flash]}"
         cr.set_source_rgba(0.1, 0.09, 0.14, 0.6)
         cr.rectangle(x, y, w, 22)
         cr.fill()
@@ -599,7 +612,36 @@ class ProCamera(Gtk.Window):
         self.view = Viewfinder(self)
         self.view.set_size_request(360, 480)
         self.view.set_vexpand(True)
-        outer.pack_start(self.view, True, True, 0)
+        overlay = Gtk.Overlay()
+        overlay.add(self.view)
+        self.flash_button = Gtk.Button()
+        for cls in ("float",):
+            self.flash_button.get_style_context().add_class(cls)
+        self.flash_button.set_halign(Gtk.Align.START)
+        self.flash_button.set_valign(Gtk.Align.START)
+        self.flash_button.set_margin_start(8)
+        self.flash_button.set_margin_top(30)
+        self.flash_button.connect("clicked", self.on_flash)
+        overlay.add_overlay(self.flash_button)
+        zoom_box = Gtk.Box(spacing=6)
+        zoom_box.set_halign(Gtk.Align.CENTER)
+        zoom_box.set_valign(Gtk.Align.END)
+        zoom_box.set_margin_bottom(8)
+        self.zoom_buttons = []
+        for step in ZOOM_STEPS:
+            button = Gtk.Button(label=f"{step}×")
+            button.get_style_context().add_class("float")
+            button.connect("clicked", self.on_zoom_step, step)
+            zoom_box.pack_start(button, False, False, 0)
+            self.zoom_buttons.append((step, button))
+        self.zoom_box = zoom_box
+        zoom_box.get_style_context().add_class("zoombox")
+        overlay.add_overlay(zoom_box)
+        outer.pack_start(overlay, True, True, 0)
+        self.pinch = Gtk.GestureZoom.new(self.view)
+        self.pinch.connect("begin", self.on_pinch_begin)
+        self.pinch.connect("scale-changed", self.on_pinch)
+        self.pinch_base = 1.0
 
         # pro rows
         self.pro_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
@@ -765,7 +807,9 @@ class ProCamera(Gtk.Window):
             parts += ["ae=manual", f"shutter={min(s.shutter, 30):.6f}", f"iso={s.iso}"]
         else:
             parts += ["ae=auto", f"ev={s.ev}"]
+        parts.append(f"zoom={s.zoom:.2f}")
         if s.camera == 0:
+            parts.append(f"flash={'torch' if s.flash == 3 else 'off'}")
             parts.append("focus=cont" if s.af else f"focus={s.focus:.3f}")
         if s.pro and s.wb == 0:
             r, b = kelvin_gains(s.kelvin)
@@ -806,7 +850,9 @@ class ProCamera(Gtk.Window):
             parts += ["ae=manual", f"shutter={min(s.shutter, 30):.6f}", f"iso={s.iso}"]
         else:
             parts += ["ae=auto", f"ev={s.ev}"]
+        parts.append(f"zoom={s.zoom:.2f}")
         if s.camera == 0:
+            parts.append(f"flash={FLASH_NAMES[s.flash]}")
             parts.append("focus=auto" if s.af else f"focus={s.focus:.3f}")
         if s.pro and s.wb == 0:
             r, b = kelvin_gains(s.kelvin)
@@ -1016,6 +1062,46 @@ class ProCamera(Gtk.Window):
             subprocess.Popen(["swaymsg", "exec", f"{BIN}/lagos-photo-edit '{self.last_photo}'"],
                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
+    def on_flash(self, _button):
+        self.s.flash = (self.s.flash + 1) % len(FLASH_NAMES)
+        self.apply_settings()
+        self.s.save()
+        self.refresh_ui()
+
+    def set_zoom(self, zoom):
+        zoom = max(1.0, min(zoom, MAX_ZOOM[self.s.camera]))
+        self.s.zoom = round(zoom, 2)
+        if self.apply_pending is None:
+            self.apply_pending = GLib.timeout_add(60, self.flush_apply)
+        self.refresh_zoom()
+
+    def on_zoom_step(self, _button, step):
+        self.set_zoom(float(step))
+
+    def on_pinch_begin(self, _gesture, _sequence):
+        self.pinch_base = self.s.zoom
+
+    def on_pinch(self, _gesture, scale):
+        self.set_zoom(self.pinch_base * scale)
+
+    def refresh_zoom(self):
+        zoom = self.s.zoom
+        top = MAX_ZOOM[self.s.camera]
+        shown = [(st, b) for st, b in self.zoom_buttons if st <= top]
+        exact = [b for st, b in shown if abs(zoom - st) < 0.05]
+        for st, button in self.zoom_buttons:
+            button.set_visible(st <= top)
+            button.set_label(f"{st}×")
+            button.get_style_context().remove_class("on")
+        if exact:
+            exact[0].get_style_context().add_class("on")
+        elif shown:
+            # pinch zoom between steps: the nearest button shows the live value
+            closest = min(shown, key=lambda item: abs(item[0] - zoom))[1]
+            closest.set_label(f"{zoom:.1f}×")
+            closest.get_style_context().add_class("on")
+        self.view.queue_draw()
+
     def on_pro(self, _button):
         self.s.pro = not self.s.pro
         self.apply_settings()
@@ -1025,6 +1111,7 @@ class ProCamera(Gtk.Window):
         s = self.s
         if key == "flip":
             s.camera = 1 - s.camera
+            s.zoom = 1.0
             s.save()
             self.cam.send("reset")
             self.start_camera()
@@ -1147,6 +1234,12 @@ class ProCamera(Gtk.Window):
             (ctx.add_class if index == s.mode else ctx.remove_class)("on")
             name = MODES[index]
             button.set_label(f"Timer {TIMERS[s.timer]}s" if name == "Timer" and index == s.mode else name)
+        self.flash_button.set_visible(s.camera == 0)
+        self.flash_button.set_label(f"FLASH {FLASH_NAMES[s.flash]}")
+        ctx = self.flash_button.get_style_context()
+        (ctx.add_class if s.flash else ctx.remove_class)("on")
+        s.zoom = min(s.zoom, MAX_ZOOM[s.camera])
+        self.refresh_zoom()
         ctx = self.pro_button.get_style_context()
         (ctx.add_class if s.pro else ctx.remove_class)("on")
         self.pro_box.set_visible(s.pro)
@@ -1237,6 +1330,10 @@ def debug_commands(app, snapshot):
                 app.scale.set_value(float(word[1]))
             elif word[0] == "wb":
                 app.on_wb(None, int(word[1]))
+            elif word[0] == "zoom":
+                app.set_zoom(float(word[1]))
+            elif word[0] == "flash":
+                app.on_flash(None)
             elif word[0] == "af":
                 app.on_af_toggle(None)
             elif word[0] == "snap":
