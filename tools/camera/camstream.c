@@ -18,6 +18,7 @@
  * keys: ae=auto|manual  shutter=<seconds>  iso=<n>  ev=<half stops, -8..8>
  *       focus=auto|cont|<diopters>  awb=<0-8>  wb=<r>,<b> (manual gains)
  *       q=<jpeg quality>  nr=<0-4>  edge=<0-3>
+ *       zoom=<1..max digital zoom> (centre crop)  flash=off|auto|on|torch
  * events: "ready <maxjpeg w> <h>", "ok set", "ok shot <path> <bytes>",
  *         "err <what>". Preview exposure is capped at 100 ms (frame rate);
  *         the still gets the full shutter time.
@@ -162,6 +163,9 @@ int chmod(const char *path, unsigned int mode);
 #define ACAMERA_SENSOR_FRAME_DURATION 0xe0001
 #define ACAMERA_SENSOR_SENSITIVITY 0xe0002
 #define ACAMERA_SCALER_CROP_REGION 0xd0005
+#define ACAMERA_FLASH_MODE 0x40002
+#define ACAMERA_CONTROL_ZOOM_RATIO 0x1002f
+#define ACAMERA_SENSOR_INFO_ACTIVE_ARRAY_SIZE 0xf0000
 
 /* cameraserver dequeues our ImageReader buffers through binder calls into this
  * process: without a binder thread pool nobody answers them */
@@ -299,10 +303,13 @@ struct params {
 	int wb_manual;
 	double wb_r, wb_b;
 	int quality, nr, edge;
+	double zoom;
+	int flash;            /* 0 off, 1 auto, 2 on, 3 torch */
 };
 
-static const struct params defaults = { 0, 0.01, 400, 0, 3, 0.0, 1, 0, 1.0, 1.0, 95, -1, -1 };
+static const struct params defaults = { 0, 0.01, 400, 0, 3, 0.0, 1, 0, 1.0, 1.0, 95, -1, -1, 1.0, 0 };
 static struct params current;
+static int32_t array_size[4]; /* active array: left, top, width, height */
 static int event_fd = -1;
 static int jpeg_done, jpeg_bytes;
 static const char *jpeg_path;
@@ -356,7 +363,19 @@ static void apply(ACaptureRequest *request, const struct params *p, int preview)
 	float f;
 
 	u8 = p->ae_manual ? 0 : 1;
+	if (!preview && !p->ae_manual && (p->flash == 1 || p->flash == 2))
+		u8 = p->flash == 1 ? 2 : 3; /* ON_AUTO_FLASH / ON_ALWAYS_FLASH, stills only */
 	ACaptureRequest_setEntry_u8(request, ACAMERA_CONTROL_AE_MODE, 1, &u8);
+	u8 = 0;
+	if (p->flash == 3)
+		u8 = 2; /* TORCH */
+	else if (!preview && p->ae_manual && p->flash == 2)
+		u8 = 1; /* SINGLE: with AE off the flash is requested directly */
+	ACaptureRequest_setEntry_u8(request, ACAMERA_FLASH_MODE, 1, &u8);
+	if (p->zoom > 1.01) {
+		f = p->zoom;
+		ACaptureRequest_setEntry_float(request, ACAMERA_CONTROL_ZOOM_RATIO, 1, &f);
+	}
 	if (p->ae_manual) {
 		double shutter = p->shutter;
 		if (preview && shutter > 0.1)
@@ -446,6 +465,11 @@ static int parse_params(struct params *p, char *tokens)
 				p->nr = atoi(value);
 			else if (!strcmp(token, "edge"))
 				p->edge = atoi(value);
+			else if (!strcmp(token, "zoom"))
+				p->zoom = strtod(value, 0);
+			else if (!strcmp(token, "flash"))
+				p->flash = !strcmp(value, "auto") ? 1 : !strcmp(value, "on") ? 2 :
+					!strcmp(value, "torch") ? 3 : 0;
 			else
 				return -1;
 		}
@@ -589,6 +613,12 @@ int main(int argc, char **argv, char **envp)
 	int jpeg_width = 0, jpeg_height = 0;
 	CHECK(ACameraManager_getCameraCharacteristics(manager, camera_id, &characteristics));
 	largest_size(characteristics, AIMAGE_FORMAT_JPEG, &jpeg_width, &jpeg_height);
+	{
+		ACameraMetadata_const_entry entry;
+		if (ACameraMetadata_getConstEntry(characteristics, ACAMERA_SENSOR_INFO_ACTIVE_ARRAY_SIZE, &entry) == 0 &&
+				entry.count >= 4)
+			memcpy(array_size, entry.data.i32, sizeof array_size);
+	}
 	ACameraDevice_StateCallbacks device_callbacks = { 0, on_disconnected, on_error };
 	CHECK(ACameraManager_openCamera(manager, camera_id, &device_callbacks, &device));
 
