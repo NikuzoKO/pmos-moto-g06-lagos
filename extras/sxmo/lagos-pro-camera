@@ -590,7 +590,10 @@ class ProCamera(Gtk.Window):
         os.makedirs(PHOTO_DIR, exist_ok=True)
 
         outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
-        self.add(outer)
+        self.stack = Gtk.Stack()
+        self.stack.add_named(outer, "cam")
+        self.stack.add_named(self.build_gallery(), "gallery")
+        self.add(self.stack)
 
         # top toggles
         top = Gtk.Box(spacing=3, homogeneous=True)
@@ -1062,9 +1065,113 @@ class ProCamera(Gtk.Window):
                 pass
 
     def on_thumb(self, _button):
-        if self.last_photo:
-            subprocess.Popen(["swaymsg", "exec", f"{BIN}/lagos-photo-edit '{self.last_photo}'"],
-                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        self.open_gallery()
+
+    # ----------------------------------------------------------------- gallery
+    def build_gallery(self):
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        self.gal_area = Gtk.DrawingArea()
+        self.gal_area.set_vexpand(True)
+        self.gal_area.connect("draw", self.on_gallery_draw)
+        self.gal_swipe = Gtk.GestureSwipe.new(self.gal_area)
+        self.gal_swipe.set_touch_only(False)
+        self.gal_swipe.connect("swipe", self.on_gallery_swipe)
+        box.pack_start(self.gal_area, True, True, 0)
+        self.gal_label = Gtk.Label()
+        self.gal_label.get_style_context().add_class("muted")
+        self.gal_label.set_margin_top(4)
+        box.pack_start(self.gal_label, False, False, 0)
+        bar = Gtk.Box(spacing=6, homogeneous=True)
+        bar.set_margin_start(6)
+        bar.set_margin_end(6)
+        bar.set_margin_top(4)
+        bar.set_margin_bottom(8)
+        self.gal_delete = Gtk.Button(label="Delete")
+        for label, handler in (("Back", lambda _b: self.close_gallery()),
+                               ("<", lambda _b: self.gallery_step(-1)),
+                               (">", lambda _b: self.gallery_step(1)),
+                               ("Delete", self.on_gallery_delete)):
+            button = Gtk.Button(label=label) if label != "Delete" else self.gal_delete
+            button.get_style_context().add_class("side")
+            button.set_size_request(-1, 52)
+            button.connect("clicked", handler)
+            bar.pack_start(button, True, True, 0)
+        box.pack_start(bar, False, False, 0)
+        self.gal_files = []
+        self.gal_index = 0
+        self.gal_pixbuf = None
+        self.gal_confirm = False
+        return box
+
+    def open_gallery(self):
+        self.gal_files = sorted(os.path.join(PHOTO_DIR, f) for f in os.listdir(PHOTO_DIR)
+                                if f.lower().endswith(".jpg"))
+        if not self.gal_files:
+            self.view.banner = "No photos yet"
+            return
+        self.gal_index = (self.gal_files.index(self.last_photo)
+                          if self.last_photo in self.gal_files else len(self.gal_files) - 1)
+        self.stack.set_visible_child_name("gallery")
+        self.gallery_show()
+
+    def close_gallery(self):
+        self.gal_pixbuf = None
+        self.stack.set_visible_child_name("cam")
+
+    def gallery_show(self):
+        self.gal_confirm = False
+        self.gal_delete.set_label("Delete")
+        path = self.gal_files[self.gal_index]
+        try:
+            pixbuf = GdkPixbuf.Pixbuf.new_from_file_at_size(path, 1440, 1440)
+            self.gal_pixbuf = pixbuf.apply_embedded_orientation() or pixbuf
+        except GLib.Error as error:
+            self.gal_pixbuf = None
+            print(f"gallery: {path}: {error}", file=sys.stderr)
+        self.gal_label.set_text(f"{os.path.basename(path)}   {self.gal_index + 1}/{len(self.gal_files)}")
+        self.gal_area.queue_draw()
+
+    def gallery_step(self, step):
+        if self.gal_files:
+            self.gal_index = (self.gal_index + step) % len(self.gal_files)
+            self.gallery_show()
+
+    def on_gallery_swipe(self, _gesture, vx, vy):
+        if abs(vx) > abs(vy) and abs(vx) > 150:
+            self.gallery_step(1 if vx < 0 else -1)
+
+    def on_gallery_delete(self, _button):
+        if not self.gal_confirm:
+            self.gal_confirm = True
+            self.gal_delete.set_label("Sure?")
+            return
+        path = self.gal_files.pop(self.gal_index)
+        try:
+            os.remove(path)
+        except OSError as error:
+            print(f"gallery: delete {path}: {error}", file=sys.stderr)
+        if self.last_photo == path:
+            self.last_photo = None
+        self.load_thumb()
+        if not self.gal_files:
+            self.close_gallery()
+            return
+        self.gal_index = min(self.gal_index, len(self.gal_files) - 1)
+        self.gallery_show()
+
+    def on_gallery_draw(self, widget, cr):
+        width, height = widget.get_allocated_width(), widget.get_allocated_height()
+        cr.set_source_rgb(0.1, 0.09, 0.14)
+        cr.paint()
+        pixbuf = self.gal_pixbuf
+        if pixbuf is None:
+            return
+        scale = min(width / pixbuf.get_width(), height / pixbuf.get_height())
+        cr.translate((width - pixbuf.get_width() * scale) / 2, (height - pixbuf.get_height() * scale) / 2)
+        cr.scale(scale, scale)
+        Gdk.cairo_set_source_pixbuf(cr, pixbuf, 0, 0)
+        cr.get_source().set_filter(cairo.FILTER_GOOD)
+        cr.paint()
 
     def on_flash(self, _button):
         self.s.flash = (self.s.flash + 1) % len(FLASH_NAMES)
