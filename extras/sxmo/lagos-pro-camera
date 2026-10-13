@@ -765,7 +765,7 @@ class ProCamera(Gtk.Window):
             return
         self.starting = True
         self.ready = False
-        self.cam.ev_pos = 0
+        self.launched = False        # ignore events until the old camstream's files are gone
         self.view.banner = "Starting camera…"
         self.view.queue_draw()
         proc = Gio.Subprocess.new([f"{BIN}/lagos-camera", "start", str(self.s.camera),
@@ -779,6 +779,8 @@ class ProCamera(Gtk.Window):
         except GLib.Error:
             pass
         self.started_at = time.monotonic()
+        self.cam.ev_pos = 0
+        self.launched = True
         GLib.timeout_add(250, self.wait_ready)
 
     def wait_ready(self):
@@ -826,10 +828,12 @@ class ProCamera(Gtk.Window):
         return True
 
     def on_events(self):
+        if self.starting and not self.launched:
+            return True
         for event in self.cam.events():
             if not event:
                 continue
-            if event[0] == "ready" and self.starting:
+            if event[0] == "ready" and self.starting and self.launched:
                 self.camera_ready()
             elif self.pending_shot and (event[0] == "err" or event[:2] == ["ok", "shot"]):
                 self.shot_result = event
