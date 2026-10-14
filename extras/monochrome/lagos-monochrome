@@ -51,6 +51,21 @@ class App(Gtk.Application):
         s.set_media_playback_requires_user_gesture(False)
         s.set_enable_mediasource(True)
         s.set_enable_developer_extras(bool(os.environ.get("LAGOS_DEBUG")))
+        if os.environ.get("LAGOS_DEBUG"):
+            # forward console output / errors to stderr
+            ucm = view.get_user_content_manager()
+            ucm.register_script_message_handler("log", None)
+            ucm.connect("script-message-received::log",
+                        lambda m, v: print("JS:", v.to_string(), file=sys.stderr, flush=True))
+            ucm.add_script(WebKit.UserScript.new(
+                "for (const k of ['log','warn','error']) { const o = console[k].bind(console);"
+                " console[k] = (...a) => { try { window.webkit.messageHandlers.log.postMessage("
+                "k + ': ' + a.map(x => (x && x.stack) || String(x)).join(' ')); } catch (e) {} o(...a); }; }"
+                " addEventListener('error', e => console.error('onerror', e.message, e.filename, e.lineno));"
+                " addEventListener('unhandledrejection', e => console.error('rejection', e.reason));",
+                WebKit.UserContentInjectedFrames.ALL_FRAMES, WebKit.UserScriptInjectionTime.START, None, None))
+        view.connect("web-process-terminated",
+                     lambda v, reason: print("web process terminated:", reason, file=sys.stderr, flush=True))
         view.load_uri(URL)
         win = Gtk.ApplicationWindow(application=self, title="Monochrome")
         win.set_default_size(360, 720)

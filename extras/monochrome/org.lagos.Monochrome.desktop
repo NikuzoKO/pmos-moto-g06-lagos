@@ -1,7 +1,8 @@
 [Desktop Entry]
 Type=Application
 Name=Monochrome
-Comment=Lossless music (local build)
+Comment=Lossless music
 Exec=lagos-monochrome
-Icon=audio-x-generic
+Icon=org.lagos.Monochrome
+StartupWMClass=org.lagos.Monochrome
 Categories=AudioVideo;Audio;Player;
