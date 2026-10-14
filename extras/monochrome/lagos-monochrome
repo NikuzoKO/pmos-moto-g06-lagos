@@ -4,6 +4,7 @@ Normal tiled window (not fullscreen) so sway shrinks it when wvkbd's exclusive z
 GTK4 text-input-v3 makes wvkbd --auto show on input focus."""
 import os, subprocess, sys, time, urllib.request
 os.environ.setdefault("GSK_RENDERER", "cairo")
+os.environ.setdefault("WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS", "1")
 os.environ.setdefault("WEBKIT_DISABLE_COMPOSITING_MODE", "1")
 os.environ.setdefault("WEBKIT_DISABLE_DMABUF_RENDERER", "1")
 import gi
