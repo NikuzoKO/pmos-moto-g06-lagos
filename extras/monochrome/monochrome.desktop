@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=Monochrome
+Comment=Lossless music (local build)
+Exec=firefox --new-window http://localhost:3000
+Icon=audio-x-generic
+Categories=AudioVideo;Audio;Player;
