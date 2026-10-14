@@ -2,6 +2,6 @@
 Type=Application
 Name=Monochrome
 Comment=Lossless music (local build)
-Exec=firefox --new-window http://localhost:3000
+Exec=firefox --kiosk --no-remote --name monochrome --profile /home/nikuzo/.local/share/monochrome-profile http://localhost:3000
 Icon=audio-x-generic
 Categories=AudioVideo;Audio;Player;
