@@ -48,11 +48,13 @@ def run_async(cmd, cb=None):
 
 
 def badge(icon, color):
-    b = Gtk.Box(halign=Gtk.Align.CENTER, valign=Gtk.Align.CENTER)
+    b = Gtk.Box(halign=Gtk.Align.START, valign=Gtk.Align.CENTER, hexpand=False)
+    b.set_size_request(40, 40)
     b.add_css_class("badge")
     img = Gtk.Image.new_from_icon_name(icon)
     img.set_pixel_size(22)
     img.set_hexpand(True)
+    img.set_halign(Gtk.Align.CENTER)
     b.append(img)
     p = Gtk.CssProvider()
     p.load_from_string(".b{background:%s;}" % COLORS.get(color, color))
