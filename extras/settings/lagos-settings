@@ -9,6 +9,26 @@ gi.require_version("Adw", "1")
 from gi.repository import Adw, Gio, GLib, Gtk
 
 CSS = b"""
+@define-color window_bg_color #191724;
+@define-color window_fg_color #e0def4;
+@define-color view_bg_color #191724;
+@define-color view_fg_color #e0def4;
+@define-color headerbar_bg_color #191724;
+@define-color headerbar_fg_color #e0def4;
+@define-color headerbar_border_color #191724;
+@define-color card_bg_color #1f1d2e;
+@define-color card_fg_color #e0def4;
+@define-color dialog_bg_color #1f1d2e;
+@define-color dialog_fg_color #e0def4;
+@define-color popover_bg_color #26233a;
+@define-color accent_bg_color #c4a7e7;
+@define-color accent_fg_color #191724;
+@define-color accent_color #c4a7e7;
+@define-color destructive_bg_color #c4a7e7;
+@define-color destructive_color #e0def4;
+@define-color success_color #c4a7e7;
+@define-color warning_color #c4a7e7;
+@define-color error_color #e0def4;
 .big-title { font-size: 30px; font-weight: 800; margin: 18px 24px 6px 24px; }
 .search-pill { border-radius: 999px; margin: 6px 14px 10px 14px; padding: 0 10px; min-height: 40px; }
 .card { border-radius: 26px; margin: 4px 12px 10px 12px; }
@@ -16,8 +36,22 @@ CSS = b"""
 .card > row:first-child { border-radius: 26px 26px 0 0; }
 .card > row:last-child { border-radius: 0 0 26px 26px; }
 .card > row:only-child { border-radius: 26px; }
-.badge { border-radius: 999px; min-width: 40px; min-height: 40px; color: white; }
-.sub { opacity: .62; font-size: 12px; }
+.badge { border-radius: 999px; min-width: 40px; min-height: 40px; background: #403d52; color: #c4a7e7; }
+switch { background: #403d52; }
+switch:checked { background: #c4a7e7; }
+switch slider { background: #e0def4; }
+scale trough { background: #403d52; }
+scale highlight { background: #c4a7e7; }
+scale slider { background: #e0def4; }
+progressbar trough { background: #403d52; }
+progressbar progress { background: #c4a7e7; }
+.card row { background: transparent; }
+.card row:active, .card row:hover { background: #26233a; }
+.card > row + row { border-top: 1px solid #26233a; }
+entry.search-pill { background: #26233a; color: #e0def4; box-shadow: none; }
+separator { background: #26233a; }
+.sub { color: #908caa; font-size: 12px; }
+row .subtitle { color: #908caa; }
 .sec { font-weight: 700; opacity: .7; margin: 10px 24px 2px 24px; }
 .conn .title { font-weight: 800; }
 """
@@ -56,10 +90,6 @@ def badge(icon, color):
     img.set_hexpand(True)
     img.set_halign(Gtk.Align.CENTER)
     b.append(img)
-    p = Gtk.CssProvider()
-    p.load_from_string(".b{background:%s;}" % COLORS.get(color, color))
-    b.add_css_class("b")
-    b.get_style_context().add_provider(p, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
     return b
 
 
@@ -332,7 +362,6 @@ class WifiPage:
         else:
             c3.append(row("Connect", activate=lambda: (self.nav.pop(), self.connect(name, None))))
         fr = row("Forget network", activate=lambda: (sh("nmcli", "con", "delete", name), self.nav.pop(), self.refresh()))
-        fr.add_css_class("error")
         c3.append(fr)
         b.append(c3)
         self.nav.push(page(name, b))
@@ -560,7 +589,7 @@ class App(Adw.Application):
         self.pages = {}
 
     def set_dark(self, on):
-        Adw.StyleManager.get_default().set_color_scheme(Adw.ColorScheme.FORCE_DARK if on else Adw.ColorScheme.FORCE_LIGHT)
+        Adw.StyleManager.get_default().set_color_scheme(Adw.ColorScheme.FORCE_DARK if on else Adw.ColorScheme.FORCE_DARK)
 
     def do_startup(self):
         Adw.Application.do_startup(self)
@@ -583,8 +612,14 @@ class App(Adw.Application):
         t = Gtk.Label(label="Settings", xalign=0)
         t.add_css_class("big-title")
         home.append(t)
-        search = Gtk.SearchEntry(placeholder_text="Search settings")
+        search = Gtk.Entry(placeholder_text="Search settings", primary_icon_name="system-search-symbolic")
         search.add_css_class("search-pill")
+        search.set_hexpand(True)
+        txt = search.get_delegate()
+        if txt:
+            txt.set_hexpand(True)
+            txt.set_max_width_chars(-1)
+            txt.set_width_chars(10)
         home.append(search)
         rows = []
 
@@ -618,7 +653,7 @@ class App(Adw.Application):
             q = e.get_text().lower()
             for r in rows:
                 r.set_visible(q in r.get_title().lower())
-        search.connect("search-changed", filt)
+        search.connect("changed", filt)
         nav.add(page("Settings", home))
         GLib.idle_add(lambda: align_start(home))
         win.present()
