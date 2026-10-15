@@ -1,0 +1,10 @@
+[Unit]
+Description=GNSS NMEA relay (stock MediaTek mnld in the camroot, on demand)
+After=lagos-wmt.service lagos-wifi.service
+
+[Service]
+ExecStart=/usr/bin/python3 -I /home/nikuzo/projects/pmos-moto-g06-lagos/tools/gps/lagos-gpsd.py
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target

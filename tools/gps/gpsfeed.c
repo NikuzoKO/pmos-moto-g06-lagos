@@ -1,7 +1,7 @@
 /*
- * gpstest: drive the stock MTK legacy GPS HAL (gps.default.so) against a running
- * mnld inside the camroot and print the NMEA it delivers.
- *   gpstest [seconds]      (default 60)
+ * gpsfeed: drive the stock MTK legacy GPS HAL (gps.default.so) against a running
+ * mnld inside the camroot and print the NMEA it delivers on stdout.
+ *   gpsfeed [seconds]      (default: until SIGTERM/SIGINT, then stops the engine)
  * Built like camshot: gcc, hand-declared prototypes, own _start -> bionic __libc_init.
  * GpsCallbacks is the 15-slot vendor variant (size 0x78, checked by the HAL).
  */
@@ -14,6 +14,7 @@ typedef unsigned char uint8_t;
 int dprintf(int fd, const char *format, ...);
 long write(int fd, const void *buffer, size_t count);
 unsigned int sleep(unsigned int sec);
+void (*signal(int sig, void (*handler)(int)))(int);
 int atoi(const char *string);
 void *dlopen(const char *file, int flags);
 void *dlsym(void *handle, const char *name);
@@ -81,6 +82,9 @@ typedef struct {
 	struct { int (*open)(const void *module, const char *id, gps_device_t **device); } *methods;
 } hw_module_t;
 
+static volatile int quit;
+static void on_signal(int sig) { quit = 1; }
+
 static void cb_nmea(int64_t ts, const char *nmea, int len)
 {
 	write(1, nmea, len);
@@ -106,7 +110,7 @@ static unsigned long create_thread(const char *name, void (*fn)(void *), void *a
 
 int main(int argc, char **argv, char **envp)
 {
-	int secs = argc > 1 ? atoi(argv[1]) : 60;
+	int secs = argc > 1 ? atoi(argv[1]) : 0;
 	void *lib = dlopen("/vendor/lib64/hw/gps.default.so", 2);
 	if (!lib) { dprintf(2, "dlopen: %s\n", dlerror()); return 1; }
 	hw_module_t *mod = dlsym(lib, "HMI");
@@ -133,7 +137,10 @@ int main(int argc, char **argv, char **envp)
 	dprintf(2, "init -> %d\n", g->init(&cbs));
 	dprintf(2, "set_position_mode -> %d\n", g->set_position_mode(1, 0, 1000, 0, 0));
 	dprintf(2, "start -> %d\n", g->start());
-	sleep(secs);
+	signal(15, on_signal);
+	signal(2, on_signal);
+	for (int i = 0; !quit && (!secs || i < secs); i++)
+		sleep(1);
 	g->stop();
 	g->cleanup();
 	return 0;
