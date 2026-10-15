@@ -9,7 +9,7 @@ gi.require_version("Adw", "1")
 from gi.repository import Adw, Gio, GLib, Gtk
 
 CSS = b"""
-.big-title { font-size: 30px; font-weight: 800; margin: 18px 18px 6px 18px; }
+.big-title { font-size: 30px; font-weight: 800; margin: 18px 24px 6px 24px; }
 .search-pill { border-radius: 999px; margin: 6px 14px 10px 14px; padding: 8px 16px; }
 .card { border-radius: 26px; margin: 4px 12px 10px 12px; }
 .card > row, .card row { padding: 4px 6px; }
@@ -81,7 +81,20 @@ def row(title, sub=None, icon=None, color="blue", nav=False, activate=None):
     return r
 
 
+def align_start(w):
+    """Left-align every label and keep headline margins on one edge with the card text."""
+    c = w.get_first_child()
+    while c:
+        if isinstance(c, Gtk.Label):
+            c.set_xalign(0)
+            c.set_halign(Gtk.Align.START)
+            c.set_justify(Gtk.Justification.LEFT)
+        align_start(c)
+        c = c.get_next_sibling()
+
+
 def page(title, content_widget):
+    align_start(content_widget)
     sc = Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.NEVER, vexpand=True)
     sc.set_child(content_widget)
     tv = Adw.ToolbarView()
@@ -601,6 +614,7 @@ class App(Adw.Application):
                 r.set_visible(q in r.get_title().lower())
         search.connect("search-changed", filt)
         nav.add(page("Settings", home))
+        GLib.idle_add(lambda: align_start(home))
         win.present()
 
 
