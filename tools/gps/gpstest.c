@@ -114,7 +114,7 @@ int main(int argc, char **argv, char **envp)
 	gps_device_t *dev = 0;
 	int r = mod->methods->open(mod, "gps", &dev);
 	if (r || !dev) { dprintf(2, "open failed %d\n", r); return 1; }
-	const GpsInterface *g = dev->get_gps_interface(dev);
+	const GpsInterface *g = ((const GpsInterface *(*)(void *))((unsigned long *)dev)[15])(dev);
 	if (!g) { dprintf(2, "no interface\n"); return 1; }
 	static GpsCallbacks cbs;
 	cbs.size = 0x78;
