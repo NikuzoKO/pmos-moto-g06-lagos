@@ -1251,51 +1251,68 @@ class App(Adw.Application):
                       "apps": apps_page, "update": update_page, "general": general_page, "developer": developer_page,
                       "time": timezone_page, "services": services_page, "kernel": kernel_log_page}
 
-        def entry(box, title, sub, icon, target, kw="", flagged=False):
-            r = row(title, sub, icon, nav=False, activate=lambda: nav.push(target() if callable(target) else target))
-            if flagged:
+        def push(target):
+            nav.push(target() if callable(target) else target)
+
+        def hub(title, sub, icon, items, kw=""):
+            """Home row that opens a page listing its member settings. items = (title, sub, icon, target, kw, flagged) or a ready row factory."""
+            def build():
+                b = new_page(title)
+                c = card()
+                for it in items:
+                    if callable(it):
+                        c.append(it())
+                        continue
+                    t, s_, ic, tg, _kw, fl = it
+                    r = row(t, s_, ic, activate=lambda tg=tg: push(tg))
+                    if fl:
+                        flag(r)
+                    r.add_suffix(Gtk.Image.new_from_icon_name("go-next-symbolic"))
+                    c.append(r)
+                b.append(c)
+                return page(title, b)
+            r = row(title, sub, icon, activate=lambda: nav.push(build()))
+            if any(not callable(i) and i[5] for i in items):
                 flag(r)
             r.add_suffix(Gtk.Image.new_from_icon_name("go-next-symbolic"))
-            r.kw = kw.lower()
-            box.append(r)
+            names = " ".join(i[0] + " " + (i[1] or "") + " " + i[4] for i in items if not callable(i))
+            r.kw = (kw + " " + names).lower()
+            home_card.append(r)
             rows.append(r)
+            self.pages["hub-" + title.lower().split()[0]] = build
 
         cur = next((l.split(":", 1)[1] for l in sh("nmcli", "-t", "-f", "ACTIVE,SSID", "dev", "wifi")[1].splitlines() if l.startswith("yes:")), None)
-        g1 = card()
-        entry(g1, "Wi-Fi", cur or ("Not connected" if self.wifi.enabled() else "Off"), "network-wireless-symbolic", self.wifi.page, "wifi network wlan internet")
-        entry(g1, "Bluetooth", None, "bluetooth-symbolic", bluetooth_page, "bluetooth pair discoverable", True)
-        entry(g1, "Mobile network", None, "network-cellular-signal-good-symbolic", mobile_page, "sim data roaming apn cellular", True)
-        ar = sw_row("Airplane mode", None, "airplane-mode-symbolic", airplane_state(),
-                    lambda on: run_async(["nmcli", "radio", "all", "off" if on else "on"]))
-        ar.kw = "airplane flight radio"
-        g1.append(ar)
-        rows.append(ar)
-        entry(g1, "Mobile hotspot", "Share data over Wi-Fi", "network-wireless-hotspot-symbolic", hotspot_page, "tethering hotspot ap", True)
-        entry(g1, "More connection settings", "DNS, VPN, SSH, firewall", "network-server-symbolic", connections_page,
-              "dns vpn mac random ssh firewall nft private", True)
-        home.append(g1)
-        g2 = card()
-        entry(g2, "Sounds and vibration", None, "audio-volume-high-symbolic", sounds_page, "volume mute speaker microphone vibration output")
-        entry(g2, "Notifications", "Do not disturb", "notifications-symbolic", notifications_page, "dnd history dunst")
-        entry(g2, "Display", "Brightness, timeout, zoom, wallpaper", "display-brightness-symbolic", display_page,
-              "brightness dark mode zoom scale rotate orientation timeout wallpaper background")
-        entry(g2, "Accessibility", "Text size, animations", "preferences-desktop-accessibility-symbolic", accessibility_page, "font text size animation")
-        home.append(g2)
-        g3 = card()
-        entry(g3, "Lock screen and security", None, "system-lock-screen-symbolic", security_page, "passcode pin lock sudo", True)
-        entry(g3, "Privacy", "Location, clear data", "preferences-system-privacy-symbolic", privacy_page, "location clipboard clear discoverable", True)
-        home.append(g3)
-        g4 = card()
-        entry(g4, "Apps", None, "view-app-grid-symbolic", apps_page, "applications launcher")
-        entry(g4, "Battery", read("/sys/class/power_supply/battery/capacity") + "%", "battery-symbolic", battery_page, "power governor cpu performance", True)
-        entry(g4, "Storage", None, "drive-harddisk-symbolic", storage_page, "disk memory swap zram cache trash", True)
-        entry(g4, "Software update", None, "software-update-available-symbolic", update_page, "apk upgrade packages", True)
-        home.append(g4)
-        g5 = card()
-        entry(g5, "General management", "Date and time, name, reset", "preferences-system-symbolic", general_page, "time zone ntp hostname reset language", True)
-        entry(g5, "Developer options", "Services, kernel log, SSH", "utilities-terminal-symbolic", developer_page, "ssh services kernel log dmesg debug", True)
-        entry(g5, "About phone", None, "phone-symbolic", about_page, "model kernel version mac")
-        home.append(g5)
+        wifi_sub = cur or ("Not connected" if self.wifi.enabled() else "Off")
+        home_card = card()
+        airplane = lambda: sw_row("Airplane mode", None, "airplane-mode-symbolic", airplane_state(),
+                                  lambda on: run_async(["nmcli", "radio", "all", "off" if on else "on"]))
+        hub("Connections", f"Wi-Fi, Bluetooth, mobile network", "network-wireless-symbolic", [
+            ("Wi-Fi", wifi_sub, "network-wireless-symbolic", self.wifi.page, "wifi network wlan internet", False),
+            ("Bluetooth", None, "bluetooth-symbolic", bluetooth_page, "bluetooth pair discoverable", True),
+            ("Mobile network", None, "network-cellular-signal-good-symbolic", mobile_page, "sim data roaming apn cellular", True),
+            airplane,
+            ("Mobile hotspot", "Share data over Wi-Fi", "network-wireless-hotspot-symbolic", hotspot_page, "tethering hotspot ap", True),
+            ("More connection settings", "DNS, VPN, SSH, firewall", "network-server-symbolic", connections_page,
+             "dns vpn mac random ssh firewall nft private", True)], "airplane flight radio")
+        hub("Sounds and display", "Volume, notifications, brightness", "audio-volume-high-symbolic", [
+            ("Sounds and vibration", None, "audio-volume-high-symbolic", sounds_page, "volume mute speaker microphone vibration output", False),
+            ("Notifications", "Do not disturb", "notifications-symbolic", notifications_page, "dnd history dunst", False),
+            ("Display", "Brightness, timeout, zoom, wallpaper", "display-brightness-symbolic", display_page,
+             "brightness dark mode zoom scale rotate orientation timeout wallpaper background", False),
+            ("Accessibility", "Text size, animations", "preferences-desktop-accessibility-symbolic", accessibility_page, "font text size animation", False)])
+        hub("Security and privacy", "Lock screen, location, clear data", "system-lock-screen-symbolic", [
+            ("Lock screen and security", None, "system-lock-screen-symbolic", security_page, "passcode pin lock sudo", True),
+            ("Privacy", "Location, clear data", "preferences-system-privacy-symbolic", privacy_page, "location clipboard clear discoverable", True)])
+        hub("Device care", "Apps, battery, storage, updates", "battery-symbolic", [
+            ("Apps", None, "view-app-grid-symbolic", apps_page, "applications launcher", False),
+            ("Battery", read("/sys/class/power_supply/battery/capacity") + "%", "battery-symbolic", battery_page, "power governor cpu performance", True),
+            ("Storage", None, "drive-harddisk-symbolic", storage_page, "disk memory swap zram cache trash", True),
+            ("Software update", None, "software-update-available-symbolic", update_page, "apk upgrade packages", True)])
+        hub("System", "Date and time, developer options, about", "preferences-system-symbolic", [
+            ("General management", "Date and time, name, reset", "preferences-system-symbolic", general_page, "time zone ntp hostname reset language", True),
+            ("Developer options", "Services, kernel log, SSH", "utilities-terminal-symbolic", developer_page, "ssh services kernel log dmesg debug", True),
+            ("About phone", None, "phone-symbolic", about_page, "model kernel version mac", False)])
+        home.append(home_card)
         power_actions(home, rows)
         home.append(note("The warning symbol marks sensitive settings. They ask for confirmation before they change anything."))
 
