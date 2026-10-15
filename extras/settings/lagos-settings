@@ -10,7 +10,7 @@ from gi.repository import Adw, Gio, GLib, Gtk
 
 CSS = b"""
 .big-title { font-size: 30px; font-weight: 800; margin: 18px 24px 6px 24px; }
-.search-pill { border-radius: 999px; margin: 6px 14px 10px 14px; padding: 8px 16px; }
+.search-pill { border-radius: 999px; margin: 6px 14px 10px 14px; padding: 0 10px; min-height: 40px; }
 .card { border-radius: 26px; margin: 4px 12px 10px 12px; }
 .card > row, .card row { padding: 4px 6px; }
 .card > row:first-child { border-radius: 26px 26px 0 0; }
@@ -19,7 +19,7 @@ CSS = b"""
 .badge { border-radius: 999px; min-width: 40px; min-height: 40px; color: white; }
 .sub { opacity: .62; font-size: 12px; }
 .sec { font-weight: 700; opacity: .7; margin: 10px 24px 2px 24px; }
-.conn { color: @accent_color; }
+.conn .title { font-weight: 800; }
 """
 COLORS = dict(blue="#3e91ff", green="#34c759", orange="#ff9500", red="#ff453a",
               purple="#af52de", teal="#30b0c7", grey="#8e8e93", pink="#ff2d78")
@@ -101,6 +101,8 @@ def page(title, content_widget):
     sc.set_child(content_widget)
     tv = Adw.ToolbarView()
     hb = Adw.HeaderBar()
+    if title == "Settings":
+        hb.set_title_widget(Gtk.Label())
     tv.add_top_bar(hb)
     tv.set_content(sc)
     return Adw.NavigationPage(title=title, child=tv)
@@ -554,6 +556,8 @@ class App(Adw.Application):
     def __init__(self):
         super().__init__(application_id="org.lagos.Settings")
         self.wifi = None
+        self.nav = None
+        self.pages = {}
 
     def set_dark(self, on):
         Adw.StyleManager.get_default().set_color_scheme(Adw.ColorScheme.FORCE_DARK if on else Adw.ColorScheme.FORCE_LIGHT)
@@ -618,6 +622,30 @@ class App(Adw.Application):
         nav.add(page("Settings", home))
         GLib.idle_add(lambda: align_start(home))
         win.present()
+        self.nav = nav
+        self.pages = {"wifi": self.wifi.page, "bluetooth": lambda: bluetooth_page(nav), "sounds": lambda: sounds_page(nav),
+                      "display": lambda: display_page(nav, self), "battery": lambda: battery_page(nav),
+                      "storage": lambda: storage_page(nav), "about": lambda: about_page(nav), "mobile": lambda: mobile_page(nav)}
+        # debug: grim is black under sway's gles2 renderer, so render ourselves.
+        # kill -USR1 <pid> -> $XDG_RUNTIME_DIR/lagos-settings.png; LAGOS_SETTINGS_PAGE=wifi opens a page at start;
+        # kill -USR2 <pid> pops back one page.
+        GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, 10, self.self_shot)
+        GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, 12, lambda: (nav.pop(), True)[1])
+        start = os.environ.get("LAGOS_SETTINGS_PAGE")
+        if start in self.pages:
+            t = self.pages[start]
+            nav.push(t() if callable(t) else t)
+
+    def self_shot(self):
+        win = self.props.active_window
+        w, h = win.get_width(), win.get_height()
+        pt = Gtk.WidgetPaintable.new(win)
+        snap = Gtk.Snapshot()
+        pt.snapshot(snap, w, h)
+        tex = win.get_native().get_renderer().render_texture(snap.to_node(), None)
+        out = os.path.join(os.environ.get("XDG_RUNTIME_DIR", "/tmp"), "lagos-settings.png")
+        tex.save_to_png(out)
+        return True
 
 
 if __name__ == "__main__":
