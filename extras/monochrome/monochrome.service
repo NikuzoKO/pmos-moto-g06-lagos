@@ -1,0 +1,9 @@
+[Unit]
+Description=Monochrome local web server
+
+[Service]
+ExecStart=%h/.local/bin/monochrome-serve
+Restart=on-failure
+
+[Install]
+WantedBy=default.target

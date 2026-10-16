@@ -1,0 +1,41 @@
+#!/usr/bin/env python3
+"""Keep kiosk apps tiled instead of fullscreen. sway ignores layer-shell exclusive zones
+for fullscreen windows, so wvkbd would overlay them; a tiled borderless window shrinks.
+App ids (one per line) in ~/.config/lagos/kiosk-apps; re-read on every event."""
+import json, os, subprocess
+
+LIST = os.path.expanduser("~/.config/lagos/kiosk-apps")
+
+
+def kiosk_ids():
+    try:
+        return {l.strip() for l in open(LIST) if l.strip() and not l.startswith("#")}
+    except OSError:
+        return set()
+
+
+def untile(con):
+    subprocess.run(["swaymsg", f"[con_id={con['id']}] fullscreen disable"],
+                   stdout=subprocess.DEVNULL)
+
+
+def main():
+    # catch windows already open at start
+    tree = json.loads(subprocess.check_output(["swaymsg", "-t", "get_tree"]))
+    stack = [tree]
+    while stack:
+        n = stack.pop()
+        stack += n.get("nodes", []) + n.get("floating_nodes", [])
+        if n.get("app_id") in kiosk_ids() and n.get("fullscreen_mode"):
+            untile(n)
+    p = subprocess.Popen(["swaymsg", "-m", "-t", "subscribe", '["window"]'],
+                         stdout=subprocess.PIPE, text=True)
+    for line in p.stdout:
+        ev = json.loads(line)
+        c = ev.get("container", {})
+        if ev.get("change") in ("new", "fullscreen_mode", "focus") and c.get("fullscreen_mode") \
+                and c.get("app_id") in kiosk_ids():
+            untile(c)
+
+
+main()

@@ -1,5 +1,5 @@
 #!/bin/sh
-# lagos-bt-audio: the Media and Notifications loopbacks (60-lagos-channels.conf)
+# lagos-bt-audio: the Media, Notifications, Alarms and System loopbacks (60-lagos-channels.conf)
 # are pinned to lagos-speaker with node.dont-reconnect, so a Bluetooth headset
 # never gets their audio. Follow it instead: while a bluez_output sink exists,
 # link both loopback outputs to it; when it goes away, link them back to the
@@ -12,7 +12,7 @@ sync() {
 	target=$(pactl list short sinks | awk '$2 ~ /^bluez_output\./ { print $2; exit }')
 	pw-link -i | grep -qx "$target:playback_FL" || target=lagos-speaker
 	links=$(pw-link -l)
-	for out in lagos-media.out lagos-notify.out; do
+	for out in lagos-media.out lagos-notify.out lagos-alarm.out lagos-system.out; do
 		for ch in FL FR; do
 			port=$out:output_$ch
 			echo "$links" | awk -v p="$port" '

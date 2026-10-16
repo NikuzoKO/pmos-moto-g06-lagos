@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Settings
+Comment=Phone settings
+Exec=lagos-settings
+Icon=preferences-system
+StartupWMClass=org.lagos.Settings
+Categories=Settings;

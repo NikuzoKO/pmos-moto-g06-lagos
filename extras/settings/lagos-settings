@@ -1,0 +1,1351 @@
+#!/usr/bin/env python3
+"""lagos-settings: One UI style settings app (GTK4 + libadwaita, NetworkManager via nmcli).
+Big collapsing title, rounded card groups, coloured icon badges, drill-down pages."""
+import os, shutil, subprocess, sys
+os.environ.setdefault("GSK_RENDERER", "cairo")
+import gi
+gi.require_version("Gtk", "4.0")
+gi.require_version("Adw", "1")
+from gi.repository import Adw, Gio, GLib, Gtk
+
+CSS = b"""
+@define-color window_bg_color #191724;
+@define-color window_fg_color #e0def4;
+@define-color view_bg_color #191724;
+@define-color view_fg_color #e0def4;
+@define-color headerbar_bg_color #191724;
+@define-color headerbar_fg_color #e0def4;
+@define-color headerbar_border_color #191724;
+@define-color card_bg_color #1f1d2e;
+@define-color card_fg_color #e0def4;
+@define-color dialog_bg_color #1f1d2e;
+@define-color dialog_fg_color #e0def4;
+@define-color popover_bg_color #26233a;
+@define-color accent_bg_color #c4a7e7;
+@define-color accent_fg_color #191724;
+@define-color accent_color #c4a7e7;
+@define-color destructive_bg_color #c4a7e7;
+@define-color destructive_color #e0def4;
+@define-color success_color #c4a7e7;
+@define-color warning_color #c4a7e7;
+@define-color error_color #e0def4;
+.big-title { font-size: 30px; font-weight: 800; margin: 18px 24px 6px 24px; }
+.search-pill { border-radius: 999px; margin: 6px 14px 10px 14px; padding: 0 10px; min-height: 40px; }
+.card { border-radius: 26px; margin: 4px 12px 10px 12px; }
+.card > row, .card row { padding: 4px 6px; }
+.card > row:first-child { border-radius: 26px 26px 0 0; }
+.card > row:last-child { border-radius: 0 0 26px 26px; }
+.card > row:only-child { border-radius: 26px; }
+.badge { border-radius: 999px; min-width: 40px; min-height: 40px; background: #403d52; color: #c4a7e7; }
+switch { background: #403d52; }
+switch:checked { background: #c4a7e7; }
+switch slider { background: #e0def4; }
+scale trough { background: #403d52; }
+scale highlight { background: #c4a7e7; }
+scale slider { background: #e0def4; }
+progressbar trough { background: #403d52; }
+progressbar progress { background: #c4a7e7; }
+.card row { background: transparent; }
+.card row:active, .card row:hover { background: #26233a; }
+.card > row + row { border-top: 1px solid #26233a; }
+entry.search-pill { background: #26233a; color: #e0def4; box-shadow: none; }
+separator { background: #26233a; }
+.sub { color: #908caa; font-size: 12px; }
+row .subtitle { color: #908caa; }
+.sec { font-weight: 700; opacity: .7; margin: 10px 24px 2px 24px; }
+.conn .title { font-weight: 800; }
+.flag { color: #c4a7e7; }
+"""
+COLORS = dict(blue="#3e91ff", green="#34c759", orange="#ff9500", red="#ff453a",
+              purple="#af52de", teal="#30b0c7", grey="#8e8e93", pink="#ff2d78")
+_provider = Gtk.CssProvider()
+
+
+def sh(*cmd, timeout=15):
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        return r.returncode, r.stdout.strip(), r.stderr.strip()
+    except Exception as e:
+        return 1, "", str(e)
+
+
+def run_async(cmd, cb=None):
+    """Run cmd in a Gio subprocess; cb(rc, stdout, stderr) on the main loop."""
+    p = Gio.Subprocess.new(cmd, Gio.SubprocessFlags.STDOUT_PIPE | Gio.SubprocessFlags.STDERR_PIPE)
+    def done(proc, res):
+        try:
+            _, out, err = proc.communicate_utf8_finish(res)
+        except GLib.Error as e:
+            out, err = "", str(e)
+        if cb:
+            cb(proc.get_exit_status(), (out or "").strip(), (err or "").strip())
+    p.communicate_utf8_async(None, None, done)
+
+
+def badge(icon, color):
+    b = Gtk.Box(halign=Gtk.Align.START, valign=Gtk.Align.CENTER, hexpand=False)
+    b.set_size_request(40, 40)
+    b.add_css_class("badge")
+    img = Gtk.Image.new_from_icon_name(icon)
+    img.set_pixel_size(22)
+    img.set_hexpand(True)
+    img.set_halign(Gtk.Align.CENTER)
+    b.append(img)
+    return b
+
+
+def card():
+    lb = Gtk.ListBox(selection_mode=Gtk.SelectionMode.NONE)
+    lb.add_css_class("card")
+    lb.add_css_class("boxed-list")
+    return lb
+
+
+def row(title, sub=None, icon=None, color="blue", nav=False, activate=None):
+    r = Adw.ActionRow(title=title, subtitle=sub or "")
+    r.set_subtitle_lines(1)
+    if icon:
+        r.add_prefix(badge(icon, color))
+    if nav:
+        r.add_suffix(Gtk.Image.new_from_icon_name("go-next-symbolic"))
+    if activate:
+        r.set_activatable(True)
+        r.connect("activated", lambda *_: activate())
+    return r
+
+
+def align_start(w):
+    """Left-align every label and keep headline margins on one edge with the card text."""
+    c = w.get_first_child()
+    while c:
+        if isinstance(c, Gtk.Label):
+            c.set_xalign(0)
+            c.set_halign(Gtk.Align.START)
+            c.set_justify(Gtk.Justification.LEFT)
+        align_start(c)
+        c = c.get_next_sibling()
+
+
+def page(title, content_widget):
+    align_start(content_widget)
+    sc = Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.NEVER, vexpand=True)
+    sc.set_child(content_widget)
+    tv = Adw.ToolbarView()
+    hb = Adw.HeaderBar()
+    if title == "Settings":
+        hb.set_title_widget(Gtk.Label())
+    tv.add_top_bar(hb)
+    tv.set_content(sc)
+    return Adw.NavigationPage(title=title, child=tv)
+
+
+def vbox():
+    return Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+
+
+def section(box, text):
+    l = Gtk.Label(label=text, xalign=0)
+    l.add_css_class("sec")
+    box.append(l)
+
+
+def switch_row(title, sub, icon, color, active, on_toggle):
+    r = row(title, sub, icon, color)
+    sw = Gtk.Switch(valign=Gtk.Align.CENTER, active=active)
+    sw.connect("state-set", lambda s, st: (on_toggle(st), False)[1])
+    r.add_suffix(sw)
+    r.set_activatable_widget(sw)
+    return r, sw
+
+
+def slider_row(title, icon, color, lo, hi, val, on_change):
+    r = Adw.ActionRow(title=title)
+    r.add_prefix(badge(icon, color))
+    sc = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, lo, hi, 1)
+    sc.set_value(val)
+    sc.set_hexpand(False)
+    sc.set_size_request(120, -1)
+    sc.set_valign(Gtk.Align.CENTER)
+    sc.connect("value-changed", lambda s: on_change(int(s.get_value())))
+    r.add_suffix(sc)
+    return r
+
+
+# ---------------------------------------------------------------- Wi-Fi
+class WifiPage:
+    def __init__(self, nav):
+        self.nav = nav
+        self.box = vbox()
+        self.page = page("Wi-Fi", self.box)
+        self.page.connect("showing", lambda *_: self.refresh())
+        self.refresh_id = 0
+        self.build()
+
+    def enabled(self):
+        return sh("nmcli", "radio", "wifi")[1] == "enabled"
+
+    def build(self):
+        b = self.box
+        t = Gtk.Label(label="Wi-Fi", xalign=0)
+        t.add_css_class("big-title")
+        b.append(t)
+        c = card()
+        r, self.sw = switch_row("On", None, None, "blue", self.enabled(), self.toggle)
+        self.onrow = r
+        c.append(r)
+        b.append(c)
+        self.cur_sec = Gtk.Label(label="Current network", xalign=0)
+        self.cur_sec.add_css_class("sec")
+        b.append(self.cur_sec)
+        self.cur_card = card()
+        b.append(self.cur_card)
+        hdr = Gtk.Box(spacing=8)
+        self.avail_lbl = Gtk.Label(label="Available networks", xalign=0, hexpand=True)
+        self.avail_lbl.add_css_class("sec")
+        self.spin = Gtk.Spinner(margin_end=20)
+        hdr.append(self.avail_lbl)
+        hdr.append(self.spin)
+        b.append(hdr)
+        self.avail_card = card()
+        b.append(self.avail_card)
+        sec = Gtk.Label(label="Saved networks", xalign=0)
+        sec.add_css_class("sec")
+        b.append(sec)
+        self.saved_card = card()
+        b.append(self.saved_card)
+        self.rescan = Gtk.Button(label="Scan again", halign=Gtk.Align.CENTER, margin_top=6, margin_bottom=24)
+        self.rescan.add_css_class("pill")
+        self.rescan.connect("clicked", lambda *_: self.refresh(True))
+        b.append(self.rescan)
+
+    def toggle(self, on):
+        run_async(["nmcli", "radio", "wifi", "on" if on else "off"], lambda *_: GLib.timeout_add(1500, self.refresh_once))
+
+    def refresh_once(self):
+        self.refresh()
+        return False
+
+    @staticmethod
+    def clear(lb):
+        while (ch := lb.get_first_child()):
+            lb.remove(ch)
+
+    def refresh(self, rescan=False):
+        on = self.enabled()
+        self.sw.set_active(on)
+        for w in (self.cur_sec, self.cur_card, self.avail_lbl, self.avail_card, self.rescan):
+            w.set_visible(on)
+        self.fill_saved()
+        if not on:
+            return
+        self.spin.start()
+        run_async(["nmcli", "-t", "-f", "IN-USE,SSID,SIGNAL,SECURITY,BSSID", "dev", "wifi", "list",
+                   "--rescan", "yes" if rescan else "auto"], self.fill_scan)
+
+    def fill_scan(self, rc, out, err):
+        self.spin.stop()
+        self.clear(self.cur_card)
+        self.clear(self.avail_card)
+        seen = {}
+        for line in out.splitlines():
+            parts = line.replace("\\:", "\x00").split(":")
+            if len(parts) < 4:
+                continue
+            use, ssid, sig, sec = parts[0], parts[1].replace("\x00", ":"), parts[2], parts[3]
+            if not ssid:
+                continue
+            e = dict(use=use == "*", ssid=ssid, sig=int(sig or 0), sec=sec)
+            old = seen.get(ssid)
+            if not old or e["use"] or (not old["use"] and e["sig"] > old["sig"]):
+                seen[ssid] = e
+        saved = self.saved_names()
+        cur = None
+        for e in sorted(seen.values(), key=lambda e: -e["sig"]):
+            icon = ("network-wireless-signal-excellent-symbolic" if e["sig"] > 75 else
+                    "network-wireless-signal-good-symbolic" if e["sig"] > 50 else
+                    "network-wireless-signal-ok-symbolic" if e["sig"] > 25 else
+                    "network-wireless-signal-weak-symbolic")
+            sub = ("Connected" if e["use"] else "Saved" if e["ssid"] in saved else
+                   "Secured" if e["sec"] else "Open")
+            r = Adw.ActionRow(title=GLib.markup_escape_text(e["ssid"]), subtitle=sub)
+            r.add_prefix(Gtk.Image.new_from_icon_name(icon))
+            if e["sec"]:
+                r.add_suffix(Gtk.Image.new_from_icon_name("system-lock-screen-symbolic"))
+            r.set_activatable(True)
+            r.connect("activated", lambda _r, e=e: self.tap(e, e["ssid"] in saved))
+            if e["use"]:
+                r.add_css_class("conn")
+                self.cur_card.append(r)
+                cur = e
+            else:
+                self.avail_card.append(r)
+        self.cur_sec.set_visible(cur is not None)
+        self.cur_card.set_visible(cur is not None)
+
+    def saved_names(self):
+        rc, out, _ = sh("nmcli", "-t", "-f", "NAME,TYPE", "con", "show")
+        return [l.rsplit(":", 1)[0] for l in out.splitlines() if l.endswith(":802-11-wireless")]
+
+    def fill_saved(self):
+        self.clear(self.saved_card)
+        for n in self.saved_names():
+            r = Adw.ActionRow(title=GLib.markup_escape_text(n))
+            r.set_activatable(True)
+            r.add_suffix(Gtk.Image.new_from_icon_name("go-next-symbolic"))
+            r.connect("activated", lambda _r, n=n: self.details(n))
+            self.saved_card.append(r)
+
+    def tap(self, e, saved):
+        if e["use"]:
+            return self.details(e["ssid"])
+        if saved or not e["sec"]:
+            self.connect(e["ssid"], None)
+        else:
+            self.ask_password(e["ssid"])
+
+    def ask_password(self, ssid):
+        d = Adw.AlertDialog(heading=ssid, body="Enter the Wi-Fi password")
+        entry = Gtk.PasswordEntry(show_peek_icon=True, activates_default=True)
+        d.set_extra_child(entry)
+        d.add_response("cancel", "Cancel")
+        d.add_response("connect", "Connect")
+        d.set_response_appearance("connect", Adw.ResponseAppearance.SUGGESTED)
+        d.set_default_response("connect")
+        d.connect("response", lambda _d, resp: resp == "connect" and self.connect(ssid, entry.get_text()))
+        d.present(self.box.get_root())
+
+    def toast(self, text):
+        self.box.get_root().toast.add_toast(Adw.Toast(title=text, timeout=3))
+
+    def connect(self, ssid, pw):
+        self.toast(f"Connecting to {ssid}…")
+        cmd = ["nmcli", "dev", "wifi", "connect", ssid] + (["password", pw] if pw else [])
+        def done(rc, out, err):
+            if rc:
+                if pw is None:
+                    sh("nmcli", "con", "delete", ssid)
+                self.toast("Couldn't connect: " + (err.splitlines()[-1] if err else "failed"))
+            else:
+                self.toast(f"Connected to {ssid}")
+            self.refresh()
+        run_async(cmd, done)
+
+    def details(self, name):
+        b = vbox()
+        t = Gtk.Label(label=name, xalign=0, wrap=True)
+        t.add_css_class("big-title")
+        b.append(t)
+        rc, out, _ = sh("nmcli", "-t", "-f", "GENERAL.STATE,IP4.ADDRESS,IP4.GATEWAY,IP4.DNS,GENERAL.DEVICES", "con", "show", name)
+        info = {}
+        for l in out.splitlines():
+            k, _, v = l.partition(":")
+            info.setdefault(k.split("[")[0], v)
+        active = "activated" in info.get("GENERAL.STATE", "")
+        c = card()
+        for lab, key in (("IP address", "IP4.ADDRESS"), ("Gateway", "IP4.GATEWAY"), ("DNS", "IP4.DNS")):
+            if info.get(key):
+                c.append(row(lab, info[key]))
+        if not active:
+            c.append(row("Not connected"))
+        b.append(c)
+        c2 = card()
+        ar = row("Auto reconnect", None)
+        auto = sh("nmcli", "-g", "connection.autoconnect", "con", "show", name)[1] == "yes"
+        sw = Gtk.Switch(valign=Gtk.Align.CENTER, active=auto)
+        sw.connect("state-set", lambda s, st: (sh("nmcli", "con", "mod", name, "connection.autoconnect", "yes" if st else "no"), False)[1])
+        ar.add_suffix(sw)
+        ar.set_activatable_widget(sw)
+        c2.append(ar)
+        b.append(c2)
+        c3 = card()
+        if active:
+            c3.append(row("Disconnect", activate=lambda: (sh("nmcli", "con", "down", name), self.nav.pop(), self.refresh())))
+        else:
+            c3.append(row("Connect", activate=lambda: (self.nav.pop(), self.connect(name, None))))
+        fr = row("Forget network", activate=lambda: (sh("nmcli", "con", "delete", name), self.nav.pop(), self.refresh()))
+        c3.append(fr)
+        b.append(c3)
+        self.nav.push(page(name, b))
+
+
+# ---------------------------------------------------------------- helpers for the pages
+APP = None
+NAV = None
+SENSITIVE_NOTE = "Sensitive setting: it can lock you out, expose the phone or break something. It asks before changing."
+
+
+def toast(text):
+    w = APP.props.active_window
+    if w:
+        w.toast.add_toast(Adw.Toast(title=text, timeout=3))
+
+
+def confirm(heading, body, action, label="Continue", cancel=None):
+    d = Adw.AlertDialog(heading=heading, body=body)
+    d.add_response("cancel", "Cancel")
+    d.add_response("ok", label)
+    d.set_response_appearance("ok", Adw.ResponseAppearance.SUGGESTED)
+    d.set_default_response("cancel")
+
+    def resp(_d, r):
+        if r == "ok":
+            action()
+        elif cancel:
+            cancel()
+    d.connect("response", resp)
+    d.present(APP.props.active_window)
+
+
+def flag(r):
+    ic = Gtk.Image.new_from_icon_name("dialog-warning-symbolic")
+    ic.add_css_class("flag")
+    ic.set_tooltip_text(SENSITIVE_NOTE)
+    r.add_suffix(ic)
+    r.sensitive_flag = True
+
+
+def title_label(text):
+    t = Gtk.Label(label=text, xalign=0, wrap=True)
+    t.add_css_class("big-title")
+    return t
+
+
+def note(text):
+    l = Gtk.Label(label=text, xalign=0, wrap=True)
+    l.add_css_class("sub")
+    l.set_margin_start(24)
+    l.set_margin_end(24)
+    l.set_margin_bottom(8)
+    return l
+
+
+def new_page(title):
+    b = vbox()
+    b.append(title_label(title))
+    return b
+
+
+def sw_row(title, sub, icon, active, on, sens=None):
+    """Switch row; sens = confirm text makes it a flagged, confirmed change."""
+    r = row(title, sub, icon)
+    sw = Gtk.Switch(valign=Gtk.Align.CENTER, active=active)
+    mode = {"m": None}
+
+    def state_set(s, st):
+        if mode["m"] == "revert" or not sens:
+            if mode["m"] != "revert":
+                on(st)
+            return False
+
+        def ok():
+            s.set_state(st)
+            on(st)
+
+        def undo():
+            mode["m"] = "revert"
+            s.set_active(not st)
+            mode["m"] = None
+        confirm(title, sens, ok, cancel=undo)
+        return True
+    sw.connect("state-set", state_set)
+    if sens:
+        flag(r)
+    r.add_suffix(sw)
+    r.set_activatable_widget(sw)
+    r.switch = sw
+    return r
+
+
+def act_row(title, sub, icon, cb, sens=None, nav=False, label="Continue"):
+    def go():
+        if sens:
+            confirm(title, sens, cb, label=label)
+        else:
+            cb()
+    r = row(title, sub, icon, nav=nav, activate=go)
+    if sens:
+        flag(r)
+    return r
+
+
+def choice_rows(c, options, current, on_pick, sens=None):
+    group = None
+    for lab, val in options:
+        rr = Adw.ActionRow(title=lab)
+        chk = Gtk.CheckButton(valign=Gtk.Align.CENTER)
+        if group:
+            chk.set_group(group)
+        else:
+            group = chk
+        chk.set_active(val == current)
+        mode = {"m": None}
+
+        def tog(w, val=val, lab=lab, mode=mode, group=group):
+            if not w.get_active() or mode["m"]:
+                return
+            if sens:
+                prev = w
+                w.set_active(False)
+                confirm(lab, sens, lambda: (mode.__setitem__("m", "x"), w.set_active(True), mode.__setitem__("m", None), on_pick(val)))
+            else:
+                on_pick(val)
+        chk.connect("toggled", tog)
+        rr.add_prefix(chk)
+        rr.set_activatable_widget(chk)
+        if sens:
+            flag(rr)
+        c.append(rr)
+
+
+def svc_active(name):
+    return sh("systemctl", "is-active", name)[1] == "active"
+
+
+def sudo_async(cmd, ok_msg=None, cb=None):
+    def done(rc, out, err):
+        if rc:
+            toast("Failed: " + (err.splitlines()[-1] if err else f"exit {rc}"))
+        elif ok_msg:
+            toast(ok_msg)
+        if cb:
+            cb(rc, out, err)
+    run_async(["sudo", "-n"] + list(cmd), done)
+
+
+def read(path, default=""):
+    try:
+        return open(path).read().strip()
+    except Exception:
+        return default
+
+
+def edit_kv(path, key, line):
+    """Replace or append a line starting with `key` in a text file (backup once)."""
+    txt = read(path)
+    if txt and not os.path.exists(path + ".bak"):
+        shutil.copy(path, path + ".bak")
+    out, hit = [], False
+    for l in txt.splitlines():
+        if l.startswith(key):
+            out.append(line)
+            hit = True
+        else:
+            out.append(l)
+    if not hit:
+        out.append(line)
+    open(path, "w").write("\n".join(out) + "\n")
+
+
+# ---------------------------------------------------------------- Connections
+def bluetooth_page():
+    b = new_page("Bluetooth")
+    powered = "Powered: yes" in sh("bluetoothctl", "show")[1]
+    c = card()
+    c.append(sw_row("On", None, None, powered, lambda on: run_async(["bluetoothctl", "power", "on" if on else "off"])))
+    b.append(c)
+    section(b, "Paired devices")
+    dc = card()
+    out = sh("bluetoothctl", "devices", "Paired")[1] or sh("bluetoothctl", "devices")[1]
+    for l in out.splitlines():
+        p = l.split(" ", 2)
+        if len(p) < 3:
+            continue
+        mac, name = p[1], p[2]
+        con = "Connected: yes" in sh("bluetoothctl", "info", mac)[1]
+        dc.append(sw_row(name, "Connected" if con else "Paired", "bluetooth-symbolic", con,
+                         lambda st, mac=mac: run_async(["bluetoothctl", "connect" if st else "disconnect", mac])))
+    b.append(dc)
+    section(b, "Visibility")
+    c2 = card()
+    disc = "Discoverable: yes" in sh("bluetoothctl", "show")[1]
+    c2.append(sw_row("Discoverable", "Lets any nearby device see this phone", "bluetooth-symbolic", disc,
+                     lambda on: run_async(["bluetoothctl", "discoverable", "on" if on else "off"]),
+                     sens="Any device in range can see and try to pair with this phone while this is on."))
+    b.append(c2)
+    return page("Bluetooth", b)
+
+
+def mobile_page():
+    b = new_page("Mobile network")
+    c = card()
+    rc, out, _ = sh("mmcli", "-m", "any")
+    info = {}
+    for l in out.splitlines():
+        if "|" in l:
+            k, _, v = l.partition(":")
+            info[k.split("|")[-1].strip()] = v.strip()
+    for lab, key in (("Operator", "operator name"), ("State", "state"), ("Signal", "signal quality"),
+                     ("Access technology", "access tech"), ("Number", "own")):
+        if info.get(key):
+            c.append(row(lab, info[key]))
+    if not info:
+        c.append(row("Modem not available"))
+    b.append(c)
+    gsm = next((l.rsplit(":", 1)[0] for l in sh("nmcli", "-t", "-f", "NAME,TYPE", "con", "show")[1].splitlines()
+                if l.endswith(":gsm")), None)
+    if gsm:
+        section(b, "Data")
+        c2 = card()
+        up = sh("nmcli", "-g", "GENERAL.STATE", "con", "show", gsm)[1] == "activated"
+        c2.append(sw_row("Mobile data", gsm, "network-cellular-signal-good-symbolic", up,
+                         lambda on: run_async(["nmcli", "con", "up" if on else "down", gsm])))
+        home_only = sh("nmcli", "-g", "gsm.home-only", "con", "show", gsm)[1] == "yes"
+        c2.append(sw_row("Data roaming", "Off keeps data on the home network", "network-cellular-signal-ok-symbolic",
+                         not home_only,
+                         lambda on: sh("nmcli", "con", "mod", gsm, "gsm.home-only", "no" if on else "yes"),
+                         sens="Roaming data can be very expensive. Turn it on only if you know your plan covers it."))
+        c2.append(sw_row("Always connect", "Reconnect data automatically", "emblem-synchronizing-symbolic",
+                         sh("nmcli", "-g", "connection.autoconnect", "con", "show", gsm)[1] == "yes",
+                         lambda on: sh("nmcli", "con", "mod", gsm, "connection.autoconnect", "yes" if on else "no")))
+        b.append(c2)
+    return page("Mobile network", b)
+
+
+def hotspot_page():
+    b = new_page("Mobile hotspot")
+    active = sh("nmcli", "-g", "GENERAL.STATE", "con", "show", "Hotspot")[1] == "activated"
+    c = card()
+
+    def start():
+        d = Adw.AlertDialog(heading="Hotspot", body="Name and password (8+ characters). Wi-Fi client mode drops while the hotspot is on.")
+        bx = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        ssid = Gtk.Entry(text=sh("hostname")[1])
+        pw = Gtk.PasswordEntry(show_peek_icon=True)
+        bx.append(ssid)
+        bx.append(pw)
+        d.set_extra_child(bx)
+        d.add_response("cancel", "Cancel")
+        d.add_response("go", "Start")
+        d.set_response_appearance("go", Adw.ResponseAppearance.SUGGESTED)
+
+        def resp(_d, r):
+            if r != "go":
+                return
+            if len(pw.get_text()) < 8:
+                return toast("Password needs 8+ characters")
+            sudo_async(["nmcli", "dev", "wifi", "hotspot", "ifname", "wlan0", "ssid", ssid.get_text(), "password", pw.get_text()],
+                       "Hotspot on")
+        d.connect("response", resp)
+        d.present(APP.props.active_window)
+    if active:
+        c.append(act_row("Turn off hotspot", "Currently sharing", "network-wireless-hotspot-symbolic",
+                         lambda: sudo_async(["nmcli", "con", "down", "Hotspot"], "Hotspot off")))
+    else:
+        c.append(act_row("Turn on hotspot", "Share this phone's mobile data over Wi-Fi", "network-wireless-hotspot-symbolic", start,
+                         sens="Anyone with the password can use your data and reach devices on the phone's network."))
+    b.append(c)
+    return page("Mobile hotspot", b)
+
+
+def connections_page():
+    b = new_page("More connection settings")
+    section(b, "Network")
+    c = card()
+    wlan = next((l.split(":")[0] for l in sh("nmcli", "-t", "-f", "NAME,TYPE,DEVICE", "con", "show", "--active")[1].splitlines()
+                 if "wireless" in l), None)
+    # DNS
+    dns = sh("nmcli", "-g", "ipv4.dns", "con", "show", wlan)[1] if wlan else ""
+    cur = {"": "auto", "1.1.1.1,1.0.0.1": "cf", "8.8.8.8,8.8.4.4": "g", "9.9.9.9,149.112.112.112": "q9"}.get(dns.replace(" ", ""), "custom")
+    c.append(row("DNS", f"Applies to {wlan}" if wlan else "Connect to Wi-Fi first", "network-server-symbolic"))
+    b.append(c)
+    if wlan:
+        def setdns(v):
+            servers = {"auto": "", "cf": "1.1.1.1 1.0.0.1", "g": "8.8.8.8 8.8.4.4", "q9": "9.9.9.9 149.112.112.112"}[v]
+            sh("nmcli", "con", "mod", wlan, "ipv4.dns", servers, "ipv4.ignore-auto-dns", "no" if servers else "yes")
+            run_async(["nmcli", "con", "up", wlan], lambda *_: toast("DNS updated"))
+        c3 = card()
+        choice_rows(c3, [("Automatic (router)", "auto"), ("Cloudflare 1.1.1.1", "cf"), ("Google 8.8.8.8", "g"), ("Quad9 9.9.9.9", "q9")],
+                    cur, setdns, sens="Changing DNS reroutes every name lookup. A bad server breaks browsing and reconnects Wi-Fi.")
+        b.append(c3)
+    section(b, "Privacy")
+    c2 = card()
+    if wlan:
+        rnd = sh("nmcli", "-g", "802-11-wireless.cloned-mac-address", "con", "show", wlan)[1] in ("random", "stable")
+        c2.append(sw_row("Random MAC address", f"For {wlan}", "avatar-default-symbolic", rnd,
+                         lambda on: (sh("nmcli", "con", "mod", wlan, "802-11-wireless.cloned-mac-address", "random" if on else "preserve"),
+                                     run_async(["nmcli", "con", "up", wlan], lambda *_: toast("Reconnected"))),
+                         sens="Some routers block unknown or changing MAC addresses. Wi-Fi reconnects."))
+    b.append(c2)
+    section(b, "VPN")
+    c4 = card()
+    vpns = [l.split(":") for l in sh("nmcli", "-t", "-f", "NAME,TYPE,STATE", "con", "show")[1].splitlines()
+            if l.split(":")[1:2] in (["vpn"], ["wireguard"])]
+    for v in vpns:
+        c4.append(sw_row(v[0], v[1], "network-vpn-symbolic", sh("nmcli", "-g", "GENERAL.STATE", "con", "show", v[0])[1] == "activated",
+                         lambda on, n=v[0]: run_async(["nmcli", "con", "up" if on else "down", n])))
+    if not vpns:
+        c4.append(row("No VPN configured"))
+    b.append(c4)
+    section(b, "Services")
+    c5 = card()
+    for svc, title, sub, body in (
+            ("sshd", "SSH server", "Remote shell on port 22", "Anyone on your network who knows a password or key can get a shell on this phone."),
+            ("lagos-firewall", "Firewall", "nftables rules for the phone", "Turning the firewall off exposes every listening service to the network.")):
+        c5.append(sw_row(title, sub, "network-server-symbolic", svc_active(svc),
+                         lambda on, svc=svc: sudo_async(["systemctl", "enable" if on else "disable", "--now", svc]),
+                         sens=body))
+    b.append(c5)
+    return page("More connection settings", b)
+
+
+# ---------------------------------------------------------------- Sounds / notifications
+def volume_get(target):
+    out = sh("wpctl", "get-volume", target)[1].split()
+    try:
+        return int(float(out[1]) * 100)
+    except Exception:
+        return 50
+
+
+def sounds_page():
+    b = new_page("Sounds and vibration")
+    c = card()
+    c.append(slider_row("Media volume", "audio-volume-high-symbolic", "purple", 0, 100, volume_get("@DEFAULT_AUDIO_SINK@"),
+                        lambda v: run_async(["wpctl", "set-volume", "@DEFAULT_AUDIO_SINK@", f"{v}%"])))
+    c.append(slider_row("Microphone", "audio-input-microphone-symbolic", "teal", 0, 100, volume_get("@DEFAULT_AUDIO_SOURCE@"),
+                        lambda v: run_async(["wpctl", "set-volume", "@DEFAULT_AUDIO_SOURCE@", f"{v}%"])))
+    b.append(c)
+    c2 = card()
+    c2.append(sw_row("Mute", "Silence all audio output", "audio-volume-muted-symbolic",
+                     "MUTED" in sh("wpctl", "get-volume", "@DEFAULT_AUDIO_SINK@")[1],
+                     lambda on: run_async(["wpctl", "set-mute", "@DEFAULT_AUDIO_SINK@", "1" if on else "0"])))
+    c2.append(sw_row("Mute microphone", None, "microphone-disabled-symbolic",
+                     "MUTED" in sh("wpctl", "get-volume", "@DEFAULT_AUDIO_SOURCE@")[1],
+                     lambda on: run_async(["wpctl", "set-mute", "@DEFAULT_AUDIO_SOURCE@", "1" if on else "0"])))
+    b.append(c2)
+    section(b, "Output")
+    c3 = card()
+    sinks = []
+    cur = None
+    for l in sh("wpctl", "status")[1].splitlines():
+        if "Sinks:" in l:
+            sinks = [True]
+            continue
+        if sinks and ("Sources:" in l or "Filters:" in l or "Streams:" in l):
+            break
+        if sinks:
+            m = l.replace("│", " ").replace("├", " ").replace("└", " ").strip()
+            star = m.startswith("*")
+            m = m.lstrip("* ").strip()
+            if m and "." in m.split()[0]:
+                sid = m.split(".")[0]
+                name = m.split(".", 1)[1].split("[vol")[0].strip()
+                sinks.append((sid, name, star))
+    sinks = [s for s in sinks if s is not True]
+    for sid, name, star in sinks:
+        c3.append(act_row(name, "In use" if star else None, "audio-speakers-symbolic",
+                          lambda sid=sid: (sh("wpctl", "set-default", sid), toast("Output changed"))))
+    if not sinks:
+        c3.append(row("No outputs found"))
+    b.append(c3)
+    c4 = card()
+    if shutil.which("lagos-vibrate"):
+        c4.append(act_row("Test vibration", None, "phone-symbolic", lambda: run_async(["lagos-vibrate"])))
+    b.append(c4)
+    return page("Sounds and vibration", b)
+
+
+def notifications_page():
+    b = new_page("Notifications")
+    c = card()
+    paused = sh("dunstctl", "is-paused")[1] == "true"
+    c.append(sw_row("Do not disturb", "Silence and hold pop-ups", "notifications-disabled-symbolic", paused,
+                    lambda on: sh("dunstctl", "set-paused", "true" if on else "false")))
+    c.append(act_row("Close all notifications", None, "window-close-symbolic", lambda: (sh("dunstctl", "close-all"), toast("Closed"))))
+    c.append(act_row("Clear notification history", f"{sh('dunstctl', 'count', 'history')[1]} stored", "user-trash-symbolic",
+                     lambda: (sh("dunstctl", "history-clear"), toast("History cleared")),
+                     sens="Cleared notification history cannot be recovered."))
+    b.append(c)
+    return page("Notifications", b)
+
+
+# ---------------------------------------------------------------- Display
+def sway_scale():
+    try:
+        import json
+        return float(json.loads(sh("swaymsg", "-t", "get_outputs", "-r")[1])[0]["scale"])
+    except Exception:
+        return 2.0
+
+
+PROFILE = os.path.expanduser("~/.config/sxmo/profile")
+GTK_INIS = [os.path.expanduser("~/.config/gtk-3.0/settings.ini"), os.path.expanduser("~/.config/gtk-4.0/settings.ini")]
+
+
+def ini_get(key, default=""):
+    for l in read(GTK_INIS[1]).splitlines():
+        if l.startswith(key + "="):
+            return l.split("=", 1)[1]
+    return default
+
+
+def ini_set(key, val):
+    for p in GTK_INIS:
+        if os.path.exists(p):
+            edit_kv(p, key + "=", f"{key}={val}")
+
+
+def display_page():
+    b = new_page("Display")
+    c = card()
+    c.append(slider_row("Brightness", "display-brightness-symbolic", "orange", 1, 100,
+                        int(100 * int(read("/sys/class/leds/lcd-backlight/brightness", "128") or 128) / 255),
+                        lambda v: run_async(["brightnessctl", "-q", "set", f"{v}%"])))
+    b.append(c)
+    c2 = card()
+    c2.append(sw_row("Dark mode", "Applies to Settings and libadwaita apps", "weather-clear-night-symbolic",
+                     Adw.StyleManager.get_default().get_dark(), APP.set_dark))
+    b.append(c2)
+    section(b, "Screen timeout")
+    cur = "120"
+    for l in read(PROFILE).splitlines():
+        if l.startswith("export SXMO_UNLOCK_IDLE_TIME="):
+            cur = l.split("=", 1)[1].strip('"')
+    c3 = card()
+    choice_rows(c3, [("30 seconds", "30"), ("1 minute", "60"), ("2 minutes", "120"), ("5 minutes", "300"), ("10 minutes", "600")], cur,
+                lambda v: (edit_kv(PROFILE, "export SXMO_UNLOCK_IDLE_TIME=", f"export SXMO_UNLOCK_IDLE_TIME={v}"), toast("Takes effect after the next restart of the UI")))
+    b.append(c3)
+    section(b, "Screen zoom")
+    c4 = card()
+    choice_rows(c4, [("Smaller (1.5x)", 1.5), ("Default (2x)", 2.0), ("Larger (2.5x)", 2.5)], sway_scale(),
+                lambda v: run_async(["swaymsg", "output", "*", "scale", str(v)]))
+    b.append(c4)
+    section(b, "Orientation")
+    c5 = card()
+    for lab, tr in (("Portrait", "normal"), ("Landscape", "90"), ("Portrait (upside down)", "180")):
+        c5.append(act_row(lab, None, "view-fullscreen-symbolic", lambda tr=tr: run_async(["swaymsg", "output", "*", "transform", tr])))
+    b.append(c5)
+    section(b, "Wallpaper")
+    c6 = card()
+
+    def pick():
+        fd = Gtk.FileDialog(title="Choose wallpaper")
+        f = Gtk.FileFilter()
+        f.add_mime_type("image/*")
+        fl = Gio.ListStore.new(Gtk.FileFilter)
+        fl.append(f)
+        fd.set_filters(fl)
+
+        def done(d, res):
+            try:
+                path = d.open_finish(res).get_path()
+            except GLib.Error:
+                return
+            dst = os.path.expanduser("~/.local/share/sxmo/background.jpg")
+            if os.path.exists(dst) and not os.path.exists(dst + ".bak"):
+                shutil.copy(dst, dst + ".bak")
+            shutil.copy(path, dst)
+            run_async(["swaymsg", "output", "*", "bg", dst, "fill"], lambda *_: toast("Wallpaper set"))
+        fd.open(APP.props.active_window, None, done)
+    c6.append(act_row("Choose image", None, "image-x-generic-symbolic", pick))
+    b.append(c6)
+    return page("Display", b)
+
+
+def accessibility_page():
+    b = new_page("Accessibility")
+    section(b, "Text size")
+    c = card()
+    fn = ini_get("gtk-font-name", "Roboto Mono 10")
+    size = fn.rsplit(" ", 1)[-1] if fn.rsplit(" ", 1)[-1].isdigit() else "10"
+    name = fn.rsplit(" ", 1)[0] if fn.rsplit(" ", 1)[-1].isdigit() else fn
+    choice_rows(c, [("Small (9)", "9"), ("Default (10)", "10"), ("Large (12)", "12"), ("Largest (14)", "14")], size,
+                lambda v: (ini_set("gtk-font-name", f"{name} {v}"), toast("Applies to apps opened from now on")))
+    b.append(c)
+    c2 = card()
+    anim = ini_get("gtk-enable-animations", "true") != "false"
+    c2.append(sw_row("Animations", "Off helps on a slow screen", "media-playback-start-symbolic", anim,
+                     lambda on: (ini_set("gtk-enable-animations", "true" if on else "false"), toast("Applies to apps opened from now on"))))
+    b.append(c2)
+    b.append(note("Screen zoom is under Display."))
+    return page("Accessibility", b)
+
+
+# ---------------------------------------------------------------- Security / privacy
+PASSCODE = os.path.expanduser("~/.config/sxmo/peanutbutter-passcode")
+
+
+def security_page():
+    b = new_page("Lock screen and security")
+    c = card()
+
+    def change():
+        d = Adw.AlertDialog(heading="Lock screen passcode", body="4 to 8 digits.")
+        bx = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        a = Gtk.PasswordEntry(show_peek_icon=True)
+        a2 = Gtk.PasswordEntry(show_peek_icon=True)
+        a.set_property("placeholder-text", "New passcode")
+        a2.set_property("placeholder-text", "Repeat")
+        bx.append(a)
+        bx.append(a2)
+        d.set_extra_child(bx)
+        d.add_response("cancel", "Cancel")
+        d.add_response("set", "Set")
+        d.set_response_appearance("set", Adw.ResponseAppearance.SUGGESTED)
+
+        def resp(_d, r):
+            if r != "set":
+                return
+            v = a.get_text()
+            if not (v.isdigit() and 4 <= len(v) <= 8):
+                return toast("Use 4 to 8 digits")
+            if v != a2.get_text():
+                return toast("They don't match")
+            if os.path.exists(PASSCODE) and not os.path.exists(PASSCODE + ".bak"):
+                shutil.copy(PASSCODE, PASSCODE + ".bak")
+            open(PASSCODE, "w").write(v + "\n")
+            os.chmod(PASSCODE, 0o600)
+            toast("Passcode changed")
+        d.connect("response", resp)
+        d.present(APP.props.active_window)
+    c.append(act_row("Change passcode", "Used by the lock screen", "system-lock-screen-symbolic", change,
+                     sens="If you forget the new passcode you need SSH or a console to recover (file ~/.config/sxmo/peanutbutter-passcode)."))
+    c.append(act_row("Lock now", None, "changes-prevent-symbolic", lambda: run_async(["sxmo_state.sh", "set", "screenoff"])))
+    b.append(c)
+    section(b, "SIM")
+    c2 = card()
+    sim = sh("mmcli", "-i", "any")[1]
+    c2.append(row("SIM state", "Locked: PIN required" if "pin" in sim.lower() and "locked" in sim.lower() else "Unlocked or unavailable", "sim-card-symbolic" if False else "phone-symbolic"))
+    b.append(c2)
+    section(b, "Device")
+    c3 = card()
+    sudo_ok = sh("sudo", "-n", "true")[0] == 0
+    r = row("Passwordless sudo", "On: any process of this user can become root" if sudo_ok else "Off", "dialog-password-symbolic")
+    if sudo_ok:
+        flag(r)
+    c3.append(r)
+    b.append(c3)
+    return page("Lock screen and security", b)
+
+
+def privacy_page():
+    b = new_page("Privacy")
+    c = card()
+    geo = "started" in sh("sh", "-c", "superctl status 2>/dev/null | grep geoclue")[1]
+    c.append(sw_row("Location services", "Lets apps ask for your position", "mark-location-symbolic", geo,
+                    lambda on: run_async(["superctl", "start" if on else "stop", "geoclue-agent"]),
+                    sens="Apps that ask can learn where you are."))
+    c.append(sw_row("Bluetooth discoverable", "Visible to nearby devices", "bluetooth-symbolic",
+                    "Discoverable: yes" in sh("bluetoothctl", "show")[1],
+                    lambda on: run_async(["bluetoothctl", "discoverable", "on" if on else "off"]),
+                    sens="Any device in range can see this phone while this is on."))
+    b.append(c)
+    section(b, "Clear data")
+    c2 = card()
+    c2.append(act_row("Clear clipboard", None, "edit-clear-symbolic", lambda: (run_async(["wl-copy", "--clear"]), toast("Cleared")) if shutil.which("wl-copy") else toast("wl-copy not installed")))
+    c2.append(act_row("Clear notification history", None, "user-trash-symbolic", lambda: (sh("dunstctl", "history-clear"), toast("Cleared")),
+                      sens="Cleared notification history cannot be recovered."))
+    c2.append(act_row("Clear screenshots", None, "image-x-generic-symbolic",
+                      lambda: (sh("sh", "-c", "rm -f ~/Pictures/shot-*.png"), toast("Screenshots deleted")),
+                      sens="Deletes every shot-*.png in ~/Pictures. This cannot be undone."))
+    b.append(c2)
+    return page("Privacy", b)
+
+
+# ---------------------------------------------------------------- Apps / updates
+def apps_page():
+    b = new_page("Apps")
+    c = card()
+    apps = sorted((a for a in Gio.AppInfo.get_all() if a.should_show()), key=lambda a: a.get_name().lower())
+    for a in apps:
+        r = Adw.ActionRow(title=GLib.markup_escape_text(a.get_name()), subtitle=GLib.markup_escape_text(a.get_description() or ""))
+        r.set_subtitle_lines(1)
+        r.set_activatable(True)
+        r.connect("activated", lambda _r, a=a: a.launch([], None))
+        c.append(r)
+    b.append(c)
+    return page("Apps", b)
+
+
+def update_page():
+    b = new_page("Software update")
+    c = card()
+    status = row("Checking…", None, "software-update-available-symbolic")
+    c.append(status)
+    b.append(c)
+    c2 = card()
+    b.append(c2)
+    spin = Gtk.Spinner(halign=Gtk.Align.START, margin_start=24)
+    b.append(spin)
+
+    def after_check(rc, out, err):
+        spin.stop()
+        n = len([l for l in out.splitlines() if l.strip()])
+        status.set_title("Up to date" if n == 0 else f"{n} updates available")
+        status.set_subtitle(err.splitlines()[-1] if rc and err else "")
+        if n:
+            def go():
+                spin.start()
+                status.set_title("Installing…")
+                sudo_async(["apk", "upgrade"], "Updates installed", lambda *_: (spin.stop(), status.set_title("Done")))
+            c2.append(act_row("Install updates", f"{n} packages", "software-update-urgent-symbolic", go,
+                              sens="Upgrades system packages. It can take a while, use data, and a bad upgrade may need a reboot or recovery.",
+                              label="Install"))
+    spin.start()
+    run_async(["sudo", "-n", "sh", "-c", "apk update >/dev/null 2>&1; apk list -u 2>/dev/null"], after_check)
+    return page("Software update", b)
+
+
+# ---------------------------------------------------------------- Battery / storage
+def battery_page():
+    b = new_page("Battery")
+    ps = "/sys/class/power_supply/"
+    c = card()
+    c.append(row(f"{read(ps + 'battery/capacity', '?')}%", read(ps + "battery/status", "Unknown"), "battery-symbolic"))
+    temp = read(ps + "battery/temp")
+    if temp.lstrip("-").isdigit():
+        c.append(row("Temperature", f"{int(temp) / 10:.1f} °C", "weather-clear-symbolic"))
+    v = read(ps + "battery/voltage_now")
+    if v.isdigit():
+        c.append(row("Voltage", f"{int(v) / 1e6:.2f} V", "battery-symbolic"))
+    health = read(ps + "battery/health")
+    if health:
+        c.append(row("Health", health, "emblem-ok-symbolic"))
+    b.append(c)
+    govs = read("/sys/devices/system/cpu/cpu0/cpufreq/scaling_available_governors").split()
+    if govs:
+        section(b, "Performance mode (CPU governor)")
+        c2 = card()
+        cur = read("/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor")
+        choice_rows(c2, [(g, g) for g in govs], cur,
+                    lambda g: sudo_async(["sh", "-c", f"echo {g} | tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor"], f"Governor: {g}"),
+                    sens="Changes CPU scaling for all cores until reboot. 'performance' drains the battery and heats the phone; 'powersave' makes it slow.")
+        b.append(c2)
+    return page("Battery", b)
+
+
+def storage_page():
+    b = new_page("Storage")
+    c = card()
+    for path, name in (("/", "Internal storage"), (os.path.expanduser("~"), "Home")):
+        try:
+            u = shutil.disk_usage(path)
+        except Exception:
+            continue
+        gb = 1024 ** 3
+        c.append(row(name, f"{u.used / gb:.1f} GB used of {u.total / gb:.1f} GB", "drive-harddisk-symbolic"))
+        bar = Gtk.ProgressBar(fraction=u.used / u.total, margin_start=14, margin_end=14, margin_bottom=10)
+        c.append(Gtk.ListBoxRow(child=bar, activatable=False, selectable=False))
+    mem = {l.split(":")[0]: int(l.split()[1]) for l in read("/proc/meminfo").splitlines() if ":" in l}
+    c.append(row("Memory", f"{(mem['MemTotal'] - mem['MemAvailable']) / 1048576:.1f} GB used of {mem['MemTotal'] / 1048576:.1f} GB", "computer-symbolic"))
+    c.append(row("Swap (zram)", f"{(mem['SwapTotal'] - mem['SwapFree']) / 1048576:.1f} GB used of {mem['SwapTotal'] / 1048576:.1f} GB", "computer-symbolic"))
+    b.append(c)
+    section(b, "Clean up")
+    c2 = card()
+    c2.append(act_row("Clear package cache", "apk cache", "user-trash-symbolic",
+                      lambda: sudo_async(["apk", "cache", "clean"], "Cache cleaned")))
+    c2.append(act_row("Empty trash", None, "user-trash-symbolic",
+                      lambda: (sh("sh", "-c", "rm -rf ~/.local/share/Trash/files/* ~/.local/share/Trash/info/*"), toast("Trash emptied")),
+                      sens="Permanently deletes everything in the trash."))
+    b.append(c2)
+    section(b, "Memory tuning")
+    c3 = card()
+    sw = read("/proc/sys/vm/swappiness", "60")
+    choice_rows(c3, [("Low (60)", "60"), ("Medium (100)", "100"), ("High (180, boot default)", "180")], sw,
+                lambda v: sudo_async(["sysctl", "-w", f"vm.swappiness={v}"], "Applied until reboot"),
+                sens="Changes how eagerly the kernel swaps. Wrong values make the phone stutter or run out of memory. Resets on reboot.")
+    b.append(c3)
+    return page("Storage", b)
+
+
+# ---------------------------------------------------------------- General management
+def timezone_page():
+    b = new_page("Date and time")
+    c = card()
+    c.append(row("Now", sh("date", "+%a %d %b %Y, %H:%M")[1], "preferences-system-time-symbolic"))
+    ntp = sh("timedatectl", "show", "-p", "NTP", "--value")[1] == "yes"
+    c.append(sw_row("Automatic time", "Sync over the network", "emblem-synchronizing-symbolic", ntp,
+                    lambda on: sudo_async(["timedatectl", "set-ntp", "true" if on else "false"]),
+                    sens="With automatic time off the clock drifts, which breaks HTTPS certificates and logins."))
+    b.append(c)
+    cur = sh("timedatectl", "show", "-p", "Timezone", "--value")[1]
+    section(b, f"Time zone: {cur}")
+    entry = Gtk.Entry(placeholder_text="Search, e.g. Montevideo", margin_start=14, margin_end=14, margin_bottom=8)
+    entry.add_css_class("search-pill")
+    b.append(entry)
+    lst = card()
+    b.append(lst)
+    zones = sh("timedatectl", "list-timezones")[1].splitlines()
+
+    def fill(*_):
+        while (ch := lst.get_first_child()):
+            lst.remove(ch)
+        q = entry.get_text().lower().replace(" ", "_")
+        hits = [z for z in zones if q in z.lower()][:25] if q else [cur]
+        for z in hits:
+            lst.append(act_row(z, "Current" if z == cur else None, "mark-location-symbolic",
+                               lambda z=z: sudo_async(["timedatectl", "set-timezone", z], f"Time zone: {z}")))
+        align_start(lst)
+    entry.connect("changed", fill)
+    fill()
+    return page("Date and time", b)
+
+
+def general_page():
+    b = new_page("General management")
+    c = card()
+    c.append(act_row("Date and time", sh("date", "+%H:%M")[1], "preferences-system-time-symbolic", lambda: NAV.push(timezone_page()), nav=True))
+    lang = os.environ.get("LANG", "en_US.UTF-8")
+    c.append(row("Language", lang, "preferences-desktop-locale-symbolic"))
+
+    def rename():
+        d = Adw.AlertDialog(heading="Device name", body="Letters, digits and dashes.")
+        e = Gtk.Entry(text=sh("hostname")[1])
+        d.set_extra_child(e)
+        d.add_response("cancel", "Cancel")
+        d.add_response("set", "Rename")
+        d.set_response_appearance("set", Adw.ResponseAppearance.SUGGESTED)
+
+        def resp(_d, r):
+            n = e.get_text().strip()
+            if r == "set" and n and all(ch.isalnum() or ch == "-" for ch in n):
+                sudo_async(["hostnamectl", "set-hostname", n], f"Renamed to {n}")
+            elif r == "set":
+                toast("Letters, digits, dashes only")
+        d.connect("response", resp)
+        d.present(APP.props.active_window)
+    c.append(act_row("Device name", sh("hostname")[1], "computer-symbolic", rename,
+                     sens="Other apps, SSH known-hosts and your network use this name. Some services need a restart to see it."))
+    b.append(c)
+    section(b, "Reset")
+    c2 = card()
+    c2.append(act_row("Reset Wi-Fi networks", "Forget every saved Wi-Fi network", "view-refresh-symbolic",
+                      lambda: (sh("sh", "-c", "nmcli -t -f NAME,TYPE con show | grep ':802-11-wireless$' | cut -d: -f1 | while read n; do nmcli con delete \"$n\"; done"),
+                               toast("Saved Wi-Fi networks removed")),
+                      sens="Deletes all saved Wi-Fi networks and passwords. You will need to type them again.", label="Reset"))
+    c2.append(act_row("Reset display zoom", None, "view-refresh-symbolic", lambda: run_async(["swaymsg", "output", "*", "scale", "2"])))
+    b.append(c2)
+    return page("General management", b)
+
+
+# ---------------------------------------------------------------- Developer options
+CORE_SERVICES = {"lagos-navbar", "lagos-statusbar", "lagos-launcher", "bonsaid", "lagos-kiosk-tile", "lagos-touchscroll", "lagos-keyboard"}
+
+
+def services_page():
+    b = new_page("Services")
+    b.append(note("Start or stop session services. Core UI services are flagged."))
+    c = card()
+    import re
+    for l in sh("superctl", "status")[1].splitlines()[1:]:
+        l = re.sub(r"\x1b\[[0-9;]*m", "", l)
+        p = l.split()
+        if len(p) < 2:
+            continue
+        name, st = p[0], p[1]
+        core = name in CORE_SERVICES
+        c.append(sw_row(name, st, "applications-system-symbolic", st == "started",
+                        lambda on, name=name: run_async(["superctl", "start" if on else "stop", name]),
+                        sens=("Core part of the phone UI. Stopping it can leave you without a navigation bar, status bar or launcher until restart." if core else None)))
+    b.append(c)
+    return page("Services", b)
+
+
+def kernel_log_page():
+    b = new_page("Kernel log")
+    tv = Gtk.TextView(editable=False, monospace=True, wrap_mode=Gtk.WrapMode.WORD_CHAR, margin_start=14, margin_end=14)
+    rc, out, err = sh("sudo", "-n", "dmesg", "--time-format", "reltime", timeout=20)
+    lines = [l for l in out.splitlines() if "wlan" not in l and "sensorHub" not in l][-150:]
+    tv.get_buffer().set_text("\n".join(lines) or err)
+    b.append(tv)
+    return page("Kernel log", b)
+
+
+def developer_page():
+    b = new_page("Developer options")
+    b.append(note("Flagged rows can break the UI or expose the phone. Each asks first."))
+    c = card()
+    c.append(act_row("Services", None, "applications-system-symbolic", lambda: NAV.push(services_page()), nav=True))
+    c.append(act_row("Kernel log", None, "utilities-terminal-symbolic", lambda: NAV.push(kernel_log_page()), nav=True))
+    c.append(sw_row("SSH server", "Remote shell on port 22", "network-server-symbolic", svc_active("sshd"),
+                    lambda on: sudo_async(["systemctl", "enable" if on else "disable", "--now", "sshd"]),
+                    sens="Anyone on your network who knows a password or key can get a shell on this phone."))
+    b.append(c)
+    section(b, "Session")
+    c2 = card()
+    c2.append(act_row("Reload UI config", "swaymsg reload", "view-refresh-symbolic", lambda: (sh("swaymsg", "reload"), toast("Reloaded")),
+                      sens="Reloads the sway config. Windows stay, but bars and keybindings are re-applied and may flicker."))
+    c2.append(act_row("Open terminal", None, "utilities-terminal-symbolic", lambda: run_async(["sh", "-c", "swaymsg exec kitty"])))
+    b.append(c2)
+    return page("Developer options", b)
+
+
+# ---------------------------------------------------------------- About / power
+def about_page():
+    b = new_page("About phone")
+    os_rel = {}
+    for l in read("/etc/os-release").splitlines():
+        if "=" in l:
+            k, v = l.split("=", 1)
+            os_rel[k] = v.strip('"')
+    c = card()
+    for lab, val in (("Device name", sh("hostname")[1]),
+                     ("Model", "Motorola Moto G06 (lagos)"),
+                     ("Operating system", os_rel.get("PRETTY_NAME", "postmarketOS")),
+                     ("Kernel", sh("uname", "-r")[1]),
+                     ("CPU", f"{os.cpu_count()} cores, {read('/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor')}"),
+                     ("Wi-Fi MAC", read("/sys/class/net/wlan0/address")),
+                     ("Bluetooth address", (sh("bluetoothctl", "show")[1].split("\n")[0].split() or ["", "", ""])[1]),
+                     ("Uptime", sh("uptime", "-p")[1] or read("/proc/uptime").split()[0] + " s")):
+        c.append(row(lab, val))
+    b.append(c)
+    return page("About phone", b)
+
+
+def airplane_state():
+    return sh("nmcli", "radio", "all")[1].count("disabled") >= 2
+
+
+def power_actions(box, rows):
+    c = card()
+    for title, icon, cmd, body in (("Restart", "system-reboot-symbolic", ["systemctl", "reboot"], "The phone reboots now. Unsaved work in open apps is lost."),
+                                   ("Power off", "system-shutdown-symbolic", ["systemctl", "poweroff"], "The phone shuts down. Hold the power key to start it again.")):
+        r = act_row(title, None, icon, lambda cmd=cmd: sudo_async(cmd), sens=body, label=title)
+        c.append(r)
+        rows.append(r)
+    box.append(c)
+
+
+# ---------------------------------------------------------------- main window
+class App(Adw.Application):
+    def __init__(self):
+        super().__init__(application_id="org.lagos.Settings")
+        self.wifi = None
+        self.nav = None
+        self.pages = {}
+
+    def set_dark(self, on):
+        Adw.StyleManager.get_default().set_color_scheme(Adw.ColorScheme.FORCE_DARK)
+
+    def do_startup(self):
+        Adw.Application.do_startup(self)
+        _provider.load_from_data(CSS)
+        Gtk.StyleContext.add_provider_for_display(__import__("gi.repository.Gdk", fromlist=["Gdk"]).Display.get_default(),
+                                                  _provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+        Adw.StyleManager.get_default().set_color_scheme(Adw.ColorScheme.FORCE_DARK)
+
+    def do_activate(self):
+        global APP, NAV
+        if self.props.active_window:
+            self.props.active_window.present()
+            return
+        APP = self
+        win = Adw.ApplicationWindow(application=self, default_width=360, default_height=780)
+        win.toast = Adw.ToastOverlay()
+        nav = Adw.NavigationView()
+        NAV = nav
+        win.toast.set_child(nav)
+        win.set_content(win.toast)
+        self.wifi = WifiPage(nav)
+        home = vbox()
+        home.append(title_label("Settings"))
+        search = Gtk.Entry(placeholder_text="Search settings", primary_icon_name="system-search-symbolic")
+        search.add_css_class("search-pill")
+        search.set_hexpand(True)
+        home.append(search)
+        rows = []
+        self.pages = {"wifi": self.wifi.page, "bluetooth": bluetooth_page, "sounds": sounds_page, "display": display_page,
+                      "battery": battery_page, "storage": storage_page, "about": about_page, "mobile": mobile_page,
+                      "hotspot": hotspot_page, "connections": connections_page, "notifications": notifications_page,
+                      "accessibility": accessibility_page, "security": security_page, "privacy": privacy_page,
+                      "apps": apps_page, "update": update_page, "general": general_page, "developer": developer_page,
+                      "time": timezone_page, "services": services_page, "kernel": kernel_log_page}
+
+        def push(target):
+            nav.push(target() if callable(target) else target)
+
+        def hub(title, sub, icon, items, kw=""):
+            """Home row that opens a page listing its member settings. items = (title, sub, icon, target, kw, flagged) or a ready row factory."""
+            def build():
+                b = new_page(title)
+                c = card()
+                for it in items:
+                    if callable(it):
+                        c.append(it())
+                        continue
+                    t, s_, ic, tg, _kw, fl = it
+                    r = row(t, s_, ic, activate=lambda tg=tg: push(tg))
+                    if fl:
+                        flag(r)
+                    r.add_suffix(Gtk.Image.new_from_icon_name("go-next-symbolic"))
+                    c.append(r)
+                b.append(c)
+                return page(title, b)
+            r = row(title, sub, icon, activate=lambda: nav.push(build()))
+            if any(not callable(i) and i[5] for i in items):
+                flag(r)
+            r.add_suffix(Gtk.Image.new_from_icon_name("go-next-symbolic"))
+            names = " ".join(i[0] + " " + (i[1] or "") + " " + i[4] for i in items if not callable(i))
+            r.kw = (kw + " " + names).lower()
+            home_card.append(r)
+            rows.append(r)
+            self.pages["hub-" + title.lower().split()[0]] = build
+
+        cur = next((l.split(":", 1)[1] for l in sh("nmcli", "-t", "-f", "ACTIVE,SSID", "dev", "wifi")[1].splitlines() if l.startswith("yes:")), None)
+        wifi_sub = cur or ("Not connected" if self.wifi.enabled() else "Off")
+        home_card = card()
+        airplane = lambda: sw_row("Airplane mode", None, "airplane-mode-symbolic", airplane_state(),
+                                  lambda on: run_async(["nmcli", "radio", "all", "off" if on else "on"]))
+        hub("Connections", f"Wi-Fi, Bluetooth, mobile network", "network-wireless-symbolic", [
+            ("Wi-Fi", wifi_sub, "network-wireless-symbolic", self.wifi.page, "wifi network wlan internet", False),
+            ("Bluetooth", None, "bluetooth-symbolic", bluetooth_page, "bluetooth pair discoverable", True),
+            ("Mobile network", None, "network-cellular-signal-good-symbolic", mobile_page, "sim data roaming apn cellular", True),
+            airplane,
+            ("Mobile hotspot", "Share data over Wi-Fi", "network-wireless-hotspot-symbolic", hotspot_page, "tethering hotspot ap", True),
+            ("More connection settings", "DNS, VPN, SSH, firewall", "network-server-symbolic", connections_page,
+             "dns vpn mac random ssh firewall nft private", True)], "airplane flight radio")
+        hub("Sounds and display", "Volume, notifications, brightness", "audio-volume-high-symbolic", [
+            ("Sounds and vibration", None, "audio-volume-high-symbolic", sounds_page, "volume mute speaker microphone vibration output", False),
+            ("Notifications", "Do not disturb", "notifications-symbolic", notifications_page, "dnd history dunst", False),
+            ("Display", "Brightness, timeout, zoom, wallpaper", "display-brightness-symbolic", display_page,
+             "brightness dark mode zoom scale rotate orientation timeout wallpaper background", False),
+            ("Accessibility", "Text size, animations", "preferences-desktop-accessibility-symbolic", accessibility_page, "font text size animation", False)])
+        hub("Security and privacy", "Lock screen, location, clear data", "system-lock-screen-symbolic", [
+            ("Lock screen and security", None, "system-lock-screen-symbolic", security_page, "passcode pin lock sudo", True),
+            ("Privacy", "Location, clear data", "preferences-system-privacy-symbolic", privacy_page, "location clipboard clear discoverable", True)])
+        hub("Device care", "Apps, battery, storage, updates", "battery-symbolic", [
+            ("Apps", None, "view-app-grid-symbolic", apps_page, "applications launcher", False),
+            ("Battery", read("/sys/class/power_supply/battery/capacity") + "%", "battery-symbolic", battery_page, "power governor cpu performance", True),
+            ("Storage", None, "drive-harddisk-symbolic", storage_page, "disk memory swap zram cache trash", True),
+            ("Software update", None, "software-update-available-symbolic", update_page, "apk upgrade packages", True)])
+        hub("System", "Date and time, developer options, about", "preferences-system-symbolic", [
+            ("General management", "Date and time, name, reset", "preferences-system-symbolic", general_page, "time zone ntp hostname reset language", True),
+            ("Developer options", "Services, kernel log, SSH", "utilities-terminal-symbolic", developer_page, "ssh services kernel log dmesg debug", True),
+            ("About phone", None, "phone-symbolic", about_page, "model kernel version mac", False)])
+        home.append(home_card)
+        power_actions(home, rows)
+        home.append(note("The warning symbol marks sensitive settings. They ask for confirmation before they change anything."))
+
+        def filt(e):
+            q = e.get_text().lower()
+            for r in rows:
+                r.set_visible(q in r.get_title().lower() or q in (r.get_subtitle() or "").lower() or q in getattr(r, "kw", "")
+                              or (q in "sensitive flagged warning" and getattr(r, "sensitive_flag", False)))
+        search.connect("changed", filt)
+        nav.add(page("Settings", home))
+        GLib.idle_add(lambda: align_start(home))
+        win.present()
+        # debug: grim is black under sway's gles2 renderer, so render ourselves.
+        # kill -USR1 <pid> -> $XDG_RUNTIME_DIR/lagos-settings.png; LAGOS_SETTINGS_PAGE=<key> opens a page at start;
+        # kill -USR2 <pid> pops back one page.
+        GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, 10, self.self_shot)
+        GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, 12, lambda: (nav.pop(), True)[1])
+        start = os.environ.get("LAGOS_SETTINGS_PAGE")
+        if start in self.pages:
+            t = self.pages[start]
+            nav.push(t() if callable(t) else t)
+
+    def self_shot(self):
+        win = self.props.active_window
+        w, h = win.get_width(), win.get_height()
+        pt = Gtk.WidgetPaintable.new(win)
+        snap = Gtk.Snapshot()
+        pt.snapshot(snap, w, h)
+        tex = win.get_native().get_renderer().render_texture(snap.to_node(), None)
+        out = os.path.join(os.environ.get("XDG_RUNTIME_DIR", "/tmp"), "lagos-settings.png")
+        tex.save_to_png(out)
+        return True
+
+
+if __name__ == "__main__":
+    sys.exit(App().run(sys.argv))

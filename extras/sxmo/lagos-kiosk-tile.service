@@ -1,0 +1,7 @@
+[Unit]
+Description=Un-fullscreen kiosk apps so the keyboard can resize them
+
+[Service]
+Type=simple
+Restart=always
+ExecStart=/home/nikuzo/.local/bin/lagos-kiosk-tile

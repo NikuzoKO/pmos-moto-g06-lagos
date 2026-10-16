@@ -30,11 +30,14 @@ if [ -f "$XDG_CONFIG_HOME"/sxmo/.busy ]; then
 	fi
 fi
 
-if [ ! -f "$XDG_CONFIG_HOME"/sxmo/.noring ]; then
+# Channel state from the volume panel (and vibrate-only at night)
+mode="$("$HOME/.local/bin/lagos-sound" mode notify 2>/dev/null || echo sound)"
+
+if [ "$mode" = sound ] && [ ! -f "$XDG_CONFIG_HOME"/sxmo/.noring ]; then
 	mpv --no-resume-playback --quiet --no-video --audio-device=pipewire/lagos-notify "$SXMO_TEXTSOUND" >> /dev/null 2>&1 &
 fi
 
-if [ ! -f "$XDG_CONFIG_HOME"/sxmo/.novibrate ]; then
+if [ "$mode" != mute ] && [ ! -f "$XDG_CONFIG_HOME"/sxmo/.novibrate ]; then
 	sxmo_vibrate 500 "${SXMO_VIBRATE_STRENGTH:-1}" &
 fi
 

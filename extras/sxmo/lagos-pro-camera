@@ -1,0 +1,1485 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: MIT
+# Pro camera for the Moto G06 (lagos): GTK3 front end for camstream's control
+# channel (tools/camera/camstream.c, started through lagos-camera).
+#   - live preview (NV21 frames from /run/lagos-cam/frame), rotated for portrait
+#   - manual shutter 1/4000..30 s, ISO 100..16000, focus (diopters / AF), EV,
+#     white balance presets + kelvin
+#   - guide lines (thirds, phi grid, diagonals, centre, 1:1 / 16:9 / 3:2 frames),
+#     histogram, zebra (clipping), focus peaking, spirit level
+#   - shutter modes: photo, timer (3/10 s), burst, long exposure, HDR bracket
+#   - photos land in ~/Pictures/Camera; lagos-photo-enhance runs on them if ENH
+#     is on (and merges HDR brackets)
+# Runs as app_id lagos-pro-camera. Env: LAGOS_CAM_ROT=<rear>,<front>[,mirror]
+# to override the preview rotation (degrees clockwise).
+
+import json
+import math
+import mmap
+import os
+import shutil
+import signal
+import struct
+import subprocess
+import sys
+import time
+
+import cv2
+import numpy as np
+
+import gi
+
+gi.require_version("Gtk", "3.0")
+gi.require_version("Gdk", "3.0")
+from gi.repository import Gdk, GdkPixbuf, Gio, GLib, Gtk, Pango  # noqa: E402
+
+import cairo  # noqa: E402
+
+GLib.set_prgname("lagos-pro-camera")
+GLib.set_application_name("Camera")
+
+RUN = "/run/lagos-cam"
+FRAME = f"{RUN}/frame"
+CTL = f"{RUN}/frame.ctl"
+EVENTS = f"{RUN}/frame.ev"
+CHROOT_RUN = "/mnt/hostcam"  # RUN as the camera process sees it
+PHOTO_DIR = os.path.expanduser("~/Pictures/Camera")
+CONFIG = os.path.expanduser("~/.config/lagos-pro-camera.json")
+BIN = os.path.expanduser("~/.local/bin")
+PREVIEW = (640, 480)
+
+SHUTTERS = [1 / 4000, 1 / 2000, 1 / 1000, 1 / 500, 1 / 250, 1 / 125, 1 / 60, 1 / 30,
+            1 / 15, 1 / 8, 1 / 4, 1 / 2, 1, 2, 4, 8, 15, 30]
+ISOS = [100, 200, 400, 800, 1600, 3200, 6400, 12800, 16000]
+WB_PRESETS = [("Auto", 1), ("Incand.", 2), ("Fluor.", 3), ("Warm fl.", 4), ("Day", 5),
+              ("Cloudy", 6), ("Twilight", 7), ("Shade", 8)]
+GRIDS = ["off", "thirds", "phi", "diagonal", "centre", "1:1", "16:9", "3:2"]
+MODES = ["Photo", "Timer", "Burst", "Long", "HDR"]
+TIMERS = [3, 10]
+FLASH_NAMES = ["off", "auto", "on", "torch"]
+ZOOM_STEPS = [1, 2, 4, 6]
+MAX_ZOOM = {0: 6.0, 1: 2.0}
+BURST_COUNT = 5
+
+CSS = """
+window.cam, window.cam box { background: #191724; }
+.cam box.zoombox { background: transparent; }
+.cam button { background: #26233a; color: #e0def4; border: none; box-shadow: none;
+    border-radius: 14px; padding: 2px 4px; min-height: 0; min-width: 0; text-shadow: none; }
+.cam button:active { background: #403d52; }
+.cam button.on { background: #c4a7e7; color: #191724; }
+.cam button.on label { color: #191724; }
+.cam button.chip { min-width: 34px; font-size: 8pt; border-radius: 12px; padding: 5px 2px; }
+.cam button.val { padding: 4px 0; border-radius: 12px; }
+.cam button.val.sel { background: #403d52; border-bottom: 2px solid #f6c177; border-radius: 12px 12px 4px 4px; }
+.cam button.dim label { color: #6e6a86; }
+.cam button.shutter { background: #e0def4; border-radius: 40px; min-width: 66px; min-height: 66px;
+    border: 4px solid #191724; box-shadow: 0 0 0 3px #e0def4; }
+.cam button.shutter.busy { background: #eb6f92; box-shadow: 0 0 0 3px #eb6f92; }
+.cam button.side { background: #26233a; border-radius: 26px; min-width: 52px; min-height: 52px; }
+.cam button.side.on { background: #c4a7e7; }
+.cam button.float { background: rgba(25,23,36,0.72); border-radius: 15px; font-size: 9pt; padding: 3px 9px; min-height: 22px; }
+.cam button.float.on { background: #f6c177; }
+.cam button.float.on label { color: #191724; }
+.cam label { color: #e0def4; }
+.cam label.muted { color: #908caa; font-size: 9pt; }
+.cam scale trough { background: #26233a; min-height: 6px; border-radius: 3px; }
+.cam scale highlight { background: #c4a7e7; border-radius: 3px; }
+.cam scale slider { background: #e0def4; min-width: 26px; min-height: 26px; border-radius: 13px;
+    border: none; box-shadow: none; }
+"""
+
+EVENT_SIZE = struct.calcsize("<qqHHi")
+
+
+def vibrate(ms=12):
+    try:
+        subprocess.Popen([f"{BIN}/lagos-vibrate", str(ms)], stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL)
+    except OSError:
+        pass
+
+
+def fmt_shutter(seconds):
+    if seconds >= 1:
+        return f'{seconds:g}"'
+    return f"1/{round(1 / seconds)}"
+
+
+def fmt_focus(diopters):
+    if diopters < 0.1:
+        return "∞"
+    return f"{100 / diopters:.0f} cm" if diopters >= 1 else f"{1 / diopters:.1f} m"
+
+
+def kelvin_gains(kelvin):
+    # relative to a ~5500 K daylight neutral; the ISP's gains are absolute, so
+    # BASE_* is the daylight pair (tuned with a grey card, see notes)
+    base_r, base_b = 2.0, 1.7
+    ratio = kelvin / 5500.0
+    return base_r * ratio ** 0.75, base_b * (1 / ratio) ** 0.75
+
+
+class Settings:
+    def __init__(self):
+        self.camera = 0              # 0 rear (CAM id 0), 1 front
+        self.pro = False
+        self.manual_exp = False
+        self.shutter_idx = SHUTTERS.index(1 / 60)
+        self.iso_idx = ISOS.index(400)
+        self.ev = 0                  # half stops
+        self.af = True
+        self.focus = 0.0             # diopters
+        self.wb = 1                  # preset id, or 0 = kelvin
+        self.kelvin = 5500
+        self.grid = 1
+        self.hist = True
+        self.zebra = False
+        self.peak = False
+        self.level = True
+        self.enhance = False
+        self.mode = 0
+        self.timer = 0               # index into TIMERS
+        self.zoom = 1.0
+        self.flash = 0               # 0 off, 1 auto, 2 on, 3 torch (rear only)
+
+    def load(self):
+        try:
+            with open(CONFIG) as handle:
+                data = json.load(handle)
+            for key, value in data.items():
+                if hasattr(self, key):
+                    setattr(self, key, value)
+        except (OSError, ValueError):
+            pass
+
+    def save(self):
+        try:
+            os.makedirs(os.path.dirname(CONFIG), exist_ok=True)
+            with open(CONFIG, "w") as handle:
+                json.dump(self.__dict__, handle)
+        except OSError:
+            pass
+
+    @property
+    def shutter(self):
+        return SHUTTERS[self.shutter_idx]
+
+    @property
+    def iso(self):
+        return ISOS[self.iso_idx]
+
+
+class Camera:
+    """camstream's text control channel."""
+
+    def __init__(self):
+        self.ev_pos = 0
+        self.mm = None
+        self.last_frames = -1
+
+    # --- control ---
+    def send(self, line):
+        try:
+            fd = os.open(CTL, os.O_WRONLY | os.O_NONBLOCK)
+        except OSError:
+            return False
+        try:
+            os.write(fd, (line + "\n").encode())
+        finally:
+            os.close(fd)
+        return True
+
+    def events(self):
+        try:
+            size = os.path.getsize(EVENTS)
+            if size < self.ev_pos:
+                self.ev_pos = 0
+            with open(EVENTS) as handle:
+                handle.seek(self.ev_pos)
+                text = handle.read()
+                self.ev_pos = handle.tell()
+        except OSError:
+            return []
+        return [line.split() for line in text.splitlines() if line.strip()]
+
+    # --- frames ---
+    def open_frames(self):
+        try:
+            with open(FRAME, "rb") as handle:
+                self.mm = mmap.mmap(handle.fileno(), 0, prot=mmap.PROT_READ)
+        except (OSError, ValueError):
+            self.mm = None
+        self.last_frames = -1
+
+    def grab(self):
+        """Newest NV21 frame as (y, bgr) or None."""
+        mm = self.mm
+        if mm is None or len(mm) < 32:
+            return None
+        magic, _ver, width, height, _fmt, seq, size, frames = struct.unpack_from("<8I", mm, 0)
+        if magic != 0x4d41434c or frames == self.last_frames or seq & 1:
+            return None
+        data = bytes(mm[32:32 + size])
+        if struct.unpack_from("<I", mm, 20)[0] != seq:
+            return None
+        self.last_frames = frames
+        yuv = np.frombuffer(data, np.uint8).reshape(height * 3 // 2, width)
+        return yuv[:height], cv2.cvtColor(yuv, cv2.COLOR_YUV2BGR_NV21)
+
+
+class Level:
+    """Roll angle (degrees) from the sensor hub's accelerometer input device."""
+
+    def __init__(self, on_change):
+        self.roll = 0.0
+        self.valid = False
+        self.on_change = on_change
+        self.accel = [0, -256, 0]
+        self.fd = None
+        for entry in sorted(os.listdir("/sys/class/input")):
+            if not entry.startswith("input"):
+                continue
+            try:
+                with open(f"/sys/class/input/{entry}/name") as handle:
+                    if "accelerometer" not in handle.read():
+                        continue
+                for node in os.listdir(f"/sys/class/input/{entry}"):
+                    if node.startswith("event"):
+                        self.fd = os.open(f"/dev/input/{node}", os.O_RDONLY | os.O_NONBLOCK)
+                        GLib.io_add_watch(self.fd, GLib.IO_IN, self.readable)
+                        return
+            except OSError:
+                pass
+
+    def readable(self, _fd, _cond):
+        try:
+            data = os.read(self.fd, EVENT_SIZE * 32)
+        except OSError:
+            return True
+        for offset in range(0, len(data) - EVENT_SIZE + 1, EVENT_SIZE):
+            _sec, _usec, etype, code, value = struct.unpack_from("<qqHHi", data, offset)
+            if etype == 3 and code < 3:
+                self.accel[code] = value
+        ax, ay, _az = self.accel
+        if abs(ax) + abs(ay) > 60:
+            roll = math.degrees(math.atan2(ax, -ay))
+            self.roll = roll if not self.valid else self.roll * 0.7 + roll * 0.3
+            self.valid = True
+            self.on_change()
+        return True
+
+
+class Viewfinder(Gtk.DrawingArea):
+    def __init__(self, app):
+        super().__init__()
+        self.app = app
+        self.surface = None
+        self.pixels = None
+        self.overlay = None          # zebra / peaking RGBA
+        self.overlay_pixels = None
+        self.hist = None
+        self.frame_size = (480, 640)
+        self.focus_ring = None       # (x, y, time)
+        self.countdown = ""
+        self.banner = ""
+        self.add_events(Gdk.EventMask.BUTTON_PRESS_MASK)
+        self.connect("draw", self.on_draw)
+        self.connect("button-press-event", self.on_press)
+        self.stripes = None
+
+    def on_press(self, _widget, event):
+        self.focus_ring = (event.x, event.y, time.monotonic())
+        self.app.tap_focus()
+        self.queue_draw()
+        return True
+
+    def set_frame(self, bgr, y):
+        rot = self.app.rotation()
+        mirror = self.app.mirror()
+        if rot:
+            code = {90: cv2.ROTATE_90_CLOCKWISE, 180: cv2.ROTATE_180,
+                    270: cv2.ROTATE_90_COUNTERCLOCKWISE}[rot]
+            bgr = cv2.rotate(bgr, code)
+            y = cv2.rotate(y, code)
+        if mirror:
+            bgr = cv2.flip(bgr, 1)
+            y = cv2.flip(y, 1)
+        gain = self.app.preview_gain()
+        if gain != 1.0:
+            bgr = cv2.convertScaleAbs(bgr, alpha=gain)
+        height, width = bgr.shape[:2]
+        self.frame_size = (width, height)
+        self.pixels = cv2.cvtColor(bgr, cv2.COLOR_BGR2BGRA)
+        self.surface = cairo.ImageSurface.create_for_data(
+            self.pixels, cairo.FORMAT_RGB24, width, height, self.pixels.strides[0])
+        s = self.app.s
+        if s.zebra or s.peak:
+            over = np.zeros((height, width, 4), np.uint8)
+            if s.peak:
+                blur = cv2.GaussianBlur(y, (5, 5), 0)
+                edge = np.abs(cv2.Laplacian(blur, cv2.CV_16S, ksize=3))
+                # only the sharpest ~3 % of the frame, never plain sensor noise
+                mask = edge > max(18, np.percentile(edge[::4, ::4], 97))
+                over[mask] = (146, 111, 235, 255)  # BGRA of #eb6f92 (love)
+            if s.zebra:
+                if self.stripes is None or self.stripes.shape != (height, width):
+                    yy, xx = np.mgrid[0:height, 0:width]
+                    self.stripes = ((xx + yy) // 6) % 2 == 0
+                mask = (y >= 250) & self.stripes
+                over[mask] = (255, 255, 255, 230)
+                low = (y <= 4) & self.stripes
+                over[low] = (250, 170, 90, 200)
+            self.overlay_pixels = over
+            self.overlay = cairo.ImageSurface.create_for_data(
+                over, cairo.FORMAT_ARGB32, width, height, over.strides[0])
+        else:
+            self.overlay = None
+        if s.hist:
+            small = cv2.resize(bgr, (160, int(160 * height / width)), interpolation=cv2.INTER_AREA)
+            self.hist = []
+            for channel in range(3):
+                values = cv2.calcHist([small], [channel], None, [64], [0, 256]).flatten()
+                self.hist.append(values)
+        self.queue_draw()
+
+    # --- drawing ---
+    def image_rect(self):
+        alloc = self.get_allocation()
+        fw, fh = self.frame_size
+        scale = min(alloc.width / fw, alloc.height / fh)
+        w, h = fw * scale, fh * scale
+        return (alloc.width - w) / 2, (alloc.height - h) / 2, w, h
+
+    def on_draw(self, _widget, cr):
+        alloc = self.get_allocation()
+        cr.set_source_rgb(0, 0, 0)
+        cr.paint()
+        x, y, w, h = self.image_rect()
+        if self.surface is not None:
+            cr.save()
+            cr.translate(x, y)
+            cr.scale(w / self.frame_size[0], h / self.frame_size[1])
+            cr.set_source_surface(self.surface, 0, 0)
+            cr.get_source().set_filter(cairo.FILTER_BILINEAR)
+            cr.paint()
+            if self.overlay is not None:
+                cr.set_source_surface(self.overlay, 0, 0)
+                cr.paint()
+            cr.restore()
+        s = self.app.s
+        self.draw_grid(cr, x, y, w, h, GRIDS[s.grid])
+        if s.level:
+            self.draw_level(cr, x, y, w, h)
+        if s.hist and self.hist:
+            self.draw_hist(cr, x + 8, y + h - 62)
+        self.draw_readout(cr, x, y, w)
+        if self.focus_ring:
+            fx, fy, started = self.focus_ring
+            age = time.monotonic() - started
+            if age < 1.2:
+                cr.set_source_rgba(0.96, 0.76, 0.47, 1 - age / 1.2)
+                cr.set_line_width(2)
+                cr.rectangle(fx - 30 + age * 6, fy - 30 + age * 6, 60 - age * 12, 60 - age * 12)
+                cr.stroke()
+                GLib.timeout_add(60, self.queue_draw)
+            else:
+                self.focus_ring = None
+        if self.countdown:
+            self.draw_text(cr, self.countdown, alloc.width / 2, alloc.height / 2, 72, center=True)
+        if self.banner:
+            self.draw_text(cr, self.banner, alloc.width / 2, y + h - 12, 13, center=True, box=True)
+        return False
+
+    @staticmethod
+    def draw_text(cr, text, x, y, size, center=False, box=False, color=(0.88, 0.87, 0.96)):
+        cr.select_font_face("sans-serif", cairo.FONT_SLANT_NORMAL, cairo.FONT_WEIGHT_BOLD)
+        cr.set_font_size(size)
+        ext = cr.text_extents(text)
+        tx = x - ext.width / 2 - ext.x_bearing if center else x
+        if box:
+            cr.set_source_rgba(0.1, 0.09, 0.14, 0.7)
+            cr.rectangle(tx - 8, y - ext.height - 6, ext.width + 16, ext.height + 12)
+            cr.fill()
+        cr.set_source_rgba(*color, 1)
+        cr.move_to(tx, y if not center or box else y + ext.height / 2)
+        cr.show_text(text)
+
+    def draw_readout(self, cr, x, y, w):
+        s = self.app.s
+        if s.manual_exp:
+            text = f"{fmt_shutter(s.shutter)}  ISO {s.iso}"
+        else:
+            text = f"AUTO  EV {s.ev / 2:+g}"
+        focus = "AF" if s.af else f"MF {fmt_focus(s.focus)}"
+        if s.camera == 1:
+            focus = "FF"
+        text += f"   f/{1.8 if s.camera == 0 else 2.0}   {focus}"
+        if s.zoom > 1.01:
+            text += f"   {s.zoom:.1f}×"
+        if s.camera == 0 and s.flash:
+            text += f"   FLASH {FLASH_NAMES[s.flash]}"
+        cr.set_source_rgba(0.1, 0.09, 0.14, 0.6)
+        cr.rectangle(x, y, w, 22)
+        cr.fill()
+        self.draw_text(cr, text, x + 8, y + 16, 12)
+
+    def draw_hist(self, cr, x, y):
+        width, height = 120, 54
+        cr.set_source_rgba(0.1, 0.09, 0.14, 0.55)
+        cr.rectangle(x, y, width, height)
+        cr.fill()
+        peak = max(float(np.max(c[1:-1])) for c in self.hist) or 1.0
+        colors = [(0.4, 0.6, 1.0), (0.4, 1.0, 0.5), (1.0, 0.4, 0.4)]  # B, G, R
+        for values, color in zip(self.hist, colors):
+            cr.set_source_rgba(*color, 0.55)
+            cr.move_to(x, y + height)
+            for index, value in enumerate(values):
+                cr.line_to(x + width * index / (len(values) - 1),
+                           y + height - height * min(value / peak, 1.0))
+            cr.line_to(x + width, y + height)
+            cr.close_path()
+            cr.fill()
+
+    def draw_grid(self, cr, x, y, w, h, kind):
+        if kind == "off":
+            return
+        cr.set_line_width(1)
+        cr.set_source_rgba(1, 1, 1, 0.55)
+
+        def line(x1, y1, x2, y2):
+            cr.move_to(x + x1 * w, y + y1 * h)
+            cr.line_to(x + x2 * w, y + y2 * h)
+            cr.stroke()
+
+        def frame(aspect):
+            # aspect = width/height of the frame laid in the portrait view
+            fh = min(1.0, (w / aspect) / h)
+            fw = min(1.0, (h * aspect) / w)
+            fx, fy = (1 - fw) / 2, (1 - fh) / 2
+            cr.set_source_rgba(0.1, 0.09, 0.14, 0.55)
+            cr.rectangle(x, y, w, h)
+            cr.rectangle(x + fx * w, y + fy * h, fw * w, fh * h)
+            cr.set_fill_rule(cairo.FILL_RULE_EVEN_ODD)
+            cr.fill()
+            cr.set_source_rgba(1, 1, 1, 0.55)
+            return fx, fy, fw, fh
+
+        if kind == "thirds":
+            for f in (1 / 3, 2 / 3):
+                line(f, 0, f, 1)
+                line(0, f, 1, f)
+        elif kind == "phi":
+            for f in (0.382, 0.618):
+                line(f, 0, f, 1)
+                line(0, f, 1, f)
+        elif kind == "diagonal":
+            line(0, 0, 1, 1)
+            line(0, 1, 1, 0)
+            line(0.5, 0, 0.5, 1)
+            line(0, 0.5, 1, 0.5)
+        elif kind == "centre":
+            line(0.5, 0.42, 0.5, 0.58)
+            line(0.42, 0.5, 0.58, 0.5)
+            cr.arc(x + w / 2, y + h / 2, w * 0.12, 0, 2 * math.pi)
+            cr.stroke()
+        elif kind in ("1:1", "16:9", "3:2"):
+            # portrait phone: 16:9 and 3:2 are held as portrait frames (9:16, 2:3)
+            aspect = {"1:1": 1.0, "16:9": 9 / 16, "3:2": 2 / 3}[kind]
+            fx, fy, fw, fh = frame(aspect)
+            for f in (1 / 3, 2 / 3):
+                line(fx + f * fw, fy, fx + f * fw, fy + fh)
+                line(fx, fy + f * fh, fx + fw, fy + f * fh)
+
+    def draw_level(self, cr, x, y, w, h):
+        lvl = self.app.level
+        if not lvl.valid:
+            return
+        roll = lvl.roll
+        if roll > 90:
+            roll -= 180
+        elif roll < -90:
+            roll += 180
+        level = abs(roll) < 1.0
+        cr.save()
+        cr.translate(x + w / 2, y + h / 2)
+        cr.set_line_width(2)
+        if level:
+            cr.set_source_rgba(0.61, 0.81, 0.85, 0.95)  # foam
+            cr.move_to(-70, 0)
+            cr.line_to(70, 0)
+            cr.stroke()
+        else:
+            cr.set_source_rgba(0.96, 0.76, 0.47, 0.9)  # gold
+            cr.rotate(math.radians(-roll))
+            cr.move_to(-60, 0)
+            cr.line_to(-14, 0)
+            cr.move_to(14, 0)
+            cr.line_to(60, 0)
+            cr.stroke()
+            cr.restore()
+            cr.save()
+            cr.translate(x + w / 2, y + h / 2)
+            cr.set_source_rgba(1, 1, 1, 0.6)
+            cr.set_line_width(1)
+            cr.move_to(-30, 0)
+            cr.line_to(30, 0)
+            cr.stroke()
+        cr.restore()
+
+
+class Task:
+    """Generator-driven background job: yields ("wait", seconds) or ("shot", path)."""
+
+    def __init__(self, app, gen):
+        self.app = app
+        self.gen = gen
+        self.wait_until = 0
+        self.result = None
+        self.cancelled = False
+        GLib.timeout_add(40, self.step)
+
+    def step(self):
+        if self.cancelled:
+            return False
+        now = time.monotonic()
+        if now < self.wait_until:
+            return True
+        try:
+            request = self.gen.send(self.result)
+        except StopIteration:
+            return False
+        self.result = None
+        if request[0] == "wait":
+            self.wait_until = now + request[1]
+        elif request[0] == "shot":
+            self.app.pending_shot = request[1]
+            self.app.shot_result = None
+            self.wait_until = 0
+            # polled below
+            GLib.timeout_add(50, self.poll_shot)
+            return False
+        return True
+
+    def poll_shot(self):
+        if self.app.shot_result is None:
+            return True
+        self.result = self.app.shot_result
+        self.app.shot_result = None
+        GLib.timeout_add(40, self.step)
+        return False
+
+
+class ProCamera(Gtk.Window):
+    def __init__(self):
+        super().__init__(title="Camera")
+        self.get_style_context().add_class("cam")
+        self.s = Settings()
+        self.s.load()
+        self.cam = Camera()
+        self.ready = False
+        self.starting = False
+        self.busy = False
+        self.pending_shot = None
+        self.shot_result = None
+        self.task = None
+        self.last_photo = None
+        self.set_timer = None
+        self.level = Level(lambda: self.view.queue_draw() if self.s.level else None)
+        self.panel = "shutter"
+        os.makedirs(PHOTO_DIR, exist_ok=True)
+
+        outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        self.stack = Gtk.Stack()
+        self.stack.add_named(outer, "cam")
+        self.stack.add_named(self.build_gallery(), "gallery")
+        self.add(self.stack)
+
+        # top toggles
+        top = Gtk.Box(spacing=3, homogeneous=True)
+        top.set_margin_start(6)
+        top.set_margin_end(6)
+        top.set_margin_top(4)
+        top.set_margin_bottom(4)
+        self.toggles = {}
+        for key, label in [("flip", "FLIP"), ("grid", "GRID"), ("hist", "HIST"), ("zebra", "ZEBRA"),
+                           ("peak", "PEAK"), ("level", "LEVEL"), ("enhance", "ENH")]:
+            button = Gtk.Button(label=label)
+            button.get_style_context().add_class("chip")
+            button.set_hexpand(True)
+            button.connect("clicked", self.on_toggle, key)
+            top.pack_start(button, True, True, 0)
+            self.toggles[key] = button
+        outer.pack_start(top, False, False, 0)
+
+        self.view = Viewfinder(self)
+        self.view.set_size_request(360, 480)
+        self.view.set_vexpand(True)
+        overlay = Gtk.Overlay()
+        overlay.add(self.view)
+        self.flash_button = Gtk.Button()
+        for cls in ("float",):
+            self.flash_button.get_style_context().add_class(cls)
+        self.flash_button.set_halign(Gtk.Align.START)
+        self.flash_button.set_valign(Gtk.Align.START)
+        self.flash_button.set_margin_start(8)
+        self.flash_button.set_margin_top(30)
+        self.flash_button.connect("clicked", self.on_flash)
+        overlay.add_overlay(self.flash_button)
+        zoom_box = Gtk.Box(spacing=6)
+        zoom_box.set_halign(Gtk.Align.CENTER)
+        zoom_box.set_valign(Gtk.Align.END)
+        zoom_box.set_margin_bottom(8)
+        self.zoom_buttons = []
+        for step in ZOOM_STEPS:
+            button = Gtk.Button(label=f"{step}×")
+            button.get_style_context().add_class("float")
+            button.connect("clicked", self.on_zoom_step, step)
+            zoom_box.pack_start(button, False, False, 0)
+            self.zoom_buttons.append((step, button))
+        self.zoom_box = zoom_box
+        zoom_box.get_style_context().add_class("zoombox")
+        overlay.add_overlay(zoom_box)
+        outer.pack_start(overlay, True, True, 0)
+        self.pinch = Gtk.GestureZoom.new(self.view)
+        self.pinch.connect("begin", self.on_pinch_begin)
+        self.pinch.connect("scale-changed", self.on_pinch)
+        self.pinch_base = 1.0
+
+        # pro rows
+        self.pro_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        self.pro_box.set_margin_start(6)
+        self.pro_box.set_margin_end(6)
+        self.pro_box.set_margin_top(4)
+        row = Gtk.Box(spacing=4, homogeneous=True)
+        self.val_buttons = {}
+        for key in ("exp", "shutter", "iso", "focus", "ev", "wb"):
+            button = Gtk.Button()
+            button.get_style_context().add_class("val")
+            button.connect("clicked", self.on_val, key)
+            row.pack_start(button, True, True, 0)
+            self.val_buttons[key] = button
+        self.pro_box.pack_start(row, False, False, 0)
+
+        self.strip = Gtk.Box(spacing=6)
+        self.strip.set_size_request(-1, 44)
+        self.scale = Gtk.Scale(orientation=Gtk.Orientation.HORIZONTAL)
+        self.scale.set_draw_value(False)
+        self.scale.set_hexpand(True)
+        self.scale.connect("value-changed", self.on_scale)
+        self.strip_label = Gtk.Label()
+        self.strip_label.set_width_chars(8)
+        self.strip.pack_start(self.scale, True, True, 4)
+        self.strip.pack_start(self.strip_label, False, False, 4)
+        self.af_button = Gtk.Button(label="AF")
+        self.af_button.get_style_context().add_class("chip")
+        self.af_button.connect("clicked", self.on_af_toggle)
+        self.strip.pack_start(self.af_button, False, False, 0)
+        self.pro_box.pack_start(self.strip, False, False, 0)
+
+        self.wb_box = Gtk.FlowBox()
+        self.wb_box.set_max_children_per_line(4)
+        self.wb_box.set_min_children_per_line(4)
+        self.wb_box.set_selection_mode(Gtk.SelectionMode.NONE)
+        self.wb_buttons = {}
+        for name, ident in WB_PRESETS + [("Kelvin", 0)]:
+            button = Gtk.Button(label=name)
+            button.get_style_context().add_class("chip")
+            button.connect("clicked", self.on_wb, ident)
+            self.wb_box.add(button)
+            self.wb_buttons[ident] = button
+        self.pro_box.pack_start(self.wb_box, False, False, 0)
+        outer.pack_start(self.pro_box, False, False, 0)
+
+        # shutter modes + shutter row
+        modes = Gtk.Box(spacing=4, homogeneous=True)
+        modes.set_margin_start(6)
+        modes.set_margin_end(6)
+        modes.set_margin_top(4)
+        self.mode_buttons = []
+        for index, name in enumerate(MODES):
+            button = Gtk.Button(label=name)
+            button.get_style_context().add_class("chip")
+            button.connect("clicked", self.on_mode, index)
+            modes.pack_start(button, True, True, 0)
+            self.mode_buttons.append(button)
+        outer.pack_start(modes, False, False, 0)
+
+        bottom = Gtk.Box(spacing=0)
+        bottom.set_margin_top(6)
+        bottom.set_margin_bottom(8)
+        self.thumb = Gtk.Button()
+        self.thumb.get_style_context().add_class("side")
+        self.thumb.connect("clicked", self.on_thumb)
+        self.thumb_image = Gtk.Image()
+        self.thumb.add(self.thumb_image)
+        self.shutter_button = Gtk.Button()
+        self.shutter_button.get_style_context().add_class("shutter")
+        self.shutter_button.connect("clicked", self.on_shutter)
+        self.pro_button = Gtk.Button(label="PRO")
+        self.pro_button.get_style_context().add_class("side")
+        self.pro_button.connect("clicked", self.on_pro)
+        for widget in (self.thumb, self.shutter_button, self.pro_button):
+            widget.set_halign(Gtk.Align.CENTER)
+            widget.set_valign(Gtk.Align.CENTER)
+            bottom.pack_start(widget, True, False, 0)
+        outer.pack_start(bottom, False, False, 0)
+
+        provider = Gtk.CssProvider()
+        provider.load_from_data(CSS.encode())
+        Gtk.StyleContext.add_provider_for_screen(Gdk.Screen.get_default(), provider,
+                                                 Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+        self.get_style_context().add_class("cam")
+        self.connect("destroy", self.on_destroy)
+        self.set_default_size(360, 740)
+        self.show_all()
+        self.refresh_ui()
+        self.load_thumb()
+        GLib.timeout_add(33, self.on_tick)
+        GLib.timeout_add(100, self.on_events)
+        self.start_camera()
+
+    # ------------------------------------------------------------------ camera
+    def rotation(self):
+        override = os.environ.get("LAGOS_CAM_ROT", "")
+        if override:
+            parts = override.split(",")
+            return int(parts[self.s.camera]) if self.s.camera < len(parts) else 0
+        return 90 if self.s.camera == 0 else 270
+
+    def mirror(self):
+        override = os.environ.get("LAGOS_CAM_ROT", "")
+        if override and len(override.split(",")) > 2:
+            return self.s.camera == 1 and override.split(",")[2] == "mirror"
+        return self.s.camera == 1
+
+    def jpeg_orientation(self):
+        # EXIF orientation that displays the (landscape) sensor frame upright
+        return {90: 6, 180: 3, 270: 8, 0: 1}[self.rotation()]
+
+    def preview_gain(self):
+        s = self.s
+        if s.manual_exp and s.shutter > 0.1:
+            return min(s.shutter / 0.1, 16.0)
+        return 1.0
+
+    def start_camera(self):
+        if self.starting:
+            return
+        self.starting = True
+        self.ready = False
+        self.launched = False        # ignore events until the old camstream's files are gone
+        self.view.banner = "Starting camera…"
+        self.view.queue_draw()
+        proc = Gio.Subprocess.new([f"{BIN}/lagos-camera", "start", str(self.s.camera),
+                                   str(PREVIEW[0]), str(PREVIEW[1])],
+                                  Gio.SubprocessFlags.STDOUT_SILENCE | Gio.SubprocessFlags.STDERR_SILENCE)
+        proc.wait_async(None, self.on_camera_started)
+
+    def on_camera_started(self, proc, result):
+        try:
+            proc.wait_finish(result)
+        except GLib.Error:
+            pass
+        self.started_at = time.monotonic()
+        self.cam.ev_pos = 0
+        self.launched = True
+        GLib.timeout_add(250, self.wait_ready)
+
+    def wait_ready(self):
+        if not self.starting:
+            return False
+        if time.monotonic() - self.started_at > 60:
+            self.starting = False
+            self.view.banner = "Camera failed to start"
+            self.view.queue_draw()
+            return False
+        return True
+
+    def camera_ready(self):
+        self.starting = False
+        self.ready = True
+        self.cam.open_frames()
+        self.view.banner = ""
+        self.apply_settings()
+
+    def apply_settings(self):
+        if not self.ready:
+            return
+        s = self.s
+        parts = []
+        if s.manual_exp:
+            parts += ["ae=manual", f"shutter={min(s.shutter, 30):.6f}", f"iso={s.iso}"]
+        else:
+            parts += ["ae=auto", f"ev={s.ev}"]
+        parts.append(f"zoom={s.zoom:.2f}")
+        if s.camera == 0:
+            parts.append(f"flash={'torch' if s.flash == 3 else 'off'}")
+            parts.append("focus=cont" if s.af else f"focus={s.focus:.3f}")
+        if s.pro and s.wb == 0:
+            r, b = kelvin_gains(s.kelvin)
+            parts.append(f"wb={r:.3f},{b:.3f}")
+        else:
+            parts.append(f"awb={s.wb if s.pro else 1}")
+        self.cam.send("set " + " ".join(parts))
+
+    def on_tick(self):
+        if self.ready and not self.busy:
+            frame = self.cam.grab()
+            if frame is not None:
+                self.view.set_frame(frame[1], frame[0])
+        return True
+
+    def on_events(self):
+        if self.starting and not self.launched:
+            return True
+        for event in self.cam.events():
+            if not event:
+                continue
+            if event[0] == "ready" and self.starting and self.launched:
+                self.camera_ready()
+            elif self.pending_shot and (event[0] == "err" or event[:2] == ["ok", "shot"]):
+                self.shot_result = event
+        return True
+
+    def tap_focus(self):
+        if self.s.camera == 0 and self.ready and not self.busy:
+            self.cam.send("af")
+            self.s.af = True
+            if self.s.pro:
+                self.refresh_ui()
+
+    # ----------------------------------------------------------------- capture
+    def shot_command(self, path, extra=""):
+        s = self.s
+        parts = ["q=95"]
+        if s.manual_exp:
+            parts += ["ae=manual", f"shutter={min(s.shutter, 30):.6f}", f"iso={s.iso}"]
+        else:
+            parts += ["ae=auto", f"ev={s.ev}"]
+        parts.append(f"zoom={s.zoom:.2f}")
+        if s.camera == 0:
+            parts.append(f"flash={FLASH_NAMES[s.flash]}")
+            parts.append("focus=auto" if s.af else f"focus={s.focus:.3f}")
+        if s.pro and s.wb == 0:
+            r, b = kelvin_gains(s.kelvin)
+            parts.append(f"wb={r:.3f},{b:.3f}")
+        else:
+            parts.append(f"awb={s.wb if s.pro else 1}")
+        return f"shot {CHROOT_RUN}/{path} {' '.join(parts)} {extra}".strip()
+
+    def take(self, name, extra="", timeout=15):
+        """Generator step: one shot; the caller does `res = yield from self.take(...)`."""
+        self.cam.send(self.shot_command(name, extra))
+        self.pending_shot = name
+        start = time.monotonic()
+        while True:
+            if self.shot_result is not None:
+                result, self.shot_result = self.shot_result, None
+                self.pending_shot = None
+                break
+            if time.monotonic() - start > timeout:
+                result = ["err", "timeout"]
+                self.pending_shot = None
+                break
+            yield ("wait", 0.05)
+        if result[0] == "ok":
+            return self.finish_photo(name)
+        return None
+
+    def finish_photo(self, name):
+        stamp = time.strftime("%Y%m%d_%H%M%S")
+        base = f"IMG_{stamp}"
+        dest = os.path.join(PHOTO_DIR, f"{base}.jpg")
+        counter = 1
+        while os.path.exists(dest):
+            dest = os.path.join(PHOTO_DIR, f"{base}_{counter}.jpg")
+            counter += 1
+        try:
+            shutil.move(os.path.join(RUN, name), dest)
+        except OSError as error:
+            self.view.banner = f"Save failed: {error}"
+            return None
+        subprocess.run(["exiftool", "-n", f"-Orientation={self.jpeg_orientation()}",
+                        "-overwrite_original", dest], stdout=subprocess.DEVNULL,
+                       stderr=subprocess.DEVNULL)
+        self.last_photo = dest
+        self.load_thumb()
+        return dest
+
+    def set_busy(self, busy, label=""):
+        self.busy = busy
+        ctx = self.shutter_button.get_style_context()
+        (ctx.add_class if busy else ctx.remove_class)("busy")
+        self.view.banner = label
+        self.view.queue_draw()
+
+    def on_shutter(self, _button):
+        if not self.ready:
+            return
+        if self.task is not None and self.busy:
+            self.cancel()
+            return
+        vibrate()
+        mode = MODES[self.s.mode]
+        generator = {"Photo": self.job_photo, "Timer": self.job_timer, "Burst": self.job_burst,
+                     "Long": self.job_long, "HDR": self.job_hdr}[mode]()
+        self.set_busy(True)
+        self.task = Task(self, generator)
+
+    def cancel(self):
+        if self.task:
+            self.task.cancelled = True
+        self.view.countdown = ""
+        self.set_busy(False)
+        self.cam.send("reset")
+        GLib.timeout_add(200, lambda: self.apply_settings() and False)
+
+    def done(self, photos):
+        self.view.countdown = ""
+        self.set_busy(False, "")
+        if photos:
+            vibrate(25)
+            if self.s.enhance:
+                for photo in photos:
+                    subprocess.Popen([f"{BIN}/lagos-photo-enhance", photo], stdout=subprocess.DEVNULL,
+                                     stderr=subprocess.DEVNULL)
+            self.view.banner = f"Saved {os.path.basename(photos[-1])}"
+            GLib.timeout_add(2500, self.clear_banner)
+        else:
+            self.view.banner = "Capture failed"
+            GLib.timeout_add(2500, self.clear_banner)
+
+    def clear_banner(self):
+        if not self.busy and not self.starting:
+            self.view.banner = ""
+            self.view.queue_draw()
+        return False
+
+    def exposing_label(self):
+        s = self.s
+        return f"Exposing {fmt_shutter(s.shutter)}…" if s.manual_exp and s.shutter >= 1 else "Capturing…"
+
+    def job_photo(self):
+        self.view.banner = self.exposing_label()
+        self.view.queue_draw()
+        timeout = 20 + (self.s.shutter * 3 if self.s.manual_exp else 0)
+        photo = yield from self.take(f"p{int(time.time() * 1000)}.jpg", timeout=timeout)
+        self.done([photo] if photo else [])
+
+    def job_timer(self):
+        for remaining in range(TIMERS[self.s.timer], 0, -1):
+            self.view.countdown = str(remaining)
+            self.view.queue_draw()
+            yield ("wait", 1.0)
+        self.view.countdown = ""
+        yield from self.job_photo()
+
+    def job_burst(self):
+        photos = []
+        for index in range(BURST_COUNT):
+            self.view.banner = f"Burst {index + 1}/{BURST_COUNT}"
+            self.view.queue_draw()
+            photo = yield from self.take(f"b{int(time.time() * 1000)}.jpg", timeout=20)
+            if photo:
+                photos.append(photo)
+        self.done(photos)
+
+    def job_long(self):
+        s = self.s
+        if not s.manual_exp:
+            s.manual_exp = True
+        seconds = max(s.shutter, 1)
+        if s.shutter < 1:
+            s.shutter_idx = SHUTTERS.index(4)
+            seconds = 4
+        start = time.monotonic()
+        name = f"l{int(time.time() * 1000)}.jpg"
+        self.cam.send(self.shot_command(name))
+        self.pending_shot = True
+        while self.shot_result is None:
+            left = max(0, seconds - (time.monotonic() - start))
+            self.view.countdown = f"{left:.0f}" if left > 0 else "…"
+            self.view.queue_draw()
+            if time.monotonic() - start > seconds * 3 + 25:
+                self.shot_result = ["err", "timeout"]
+                break
+            yield ("wait", 0.2)
+        result, self.shot_result = self.shot_result, None
+        self.pending_shot = None
+        self.view.countdown = ""
+        photo = None
+        if result[0] == "ok" and len(result) > 2:
+            photo = self.finish_photo(os.path.basename(result[2]))
+        self.done([photo] if photo else [])
+
+    def job_hdr(self):
+        s = self.s
+        shots = []
+        if s.manual_exp:
+            base = s.shutter_idx
+            variants = [("", max(base - 2, 0)), ("", base), ("", min(base + 2, len(SHUTTERS) - 1))]
+            extras = [f"shutter={SHUTTERS[i]:.6f}" for _n, i in variants]
+        else:
+            extras = ["ev=-4", "ev=0", "ev=4"]
+        for index, extra in enumerate(extras):
+            self.view.banner = f"HDR {index + 1}/3"
+            self.view.queue_draw()
+            photo = yield from self.take(f"h{int(time.time() * 1000)}.jpg", extra=extra, timeout=30)
+            if photo:
+                shots.append(photo)
+        if len(shots) == 3:
+            self.view.banner = "Merging HDR…"
+            self.view.queue_draw()
+            out = shots[1].replace(".jpg", "_HDR.jpg")
+            proc = Gio.Subprocess.new([f"{BIN}/lagos-photo-enhance", "--hdr", out] + shots,
+                                      Gio.SubprocessFlags.STDOUT_SILENCE | Gio.SubprocessFlags.STDERR_SILENCE)
+            finished = {}
+            proc.wait_async(None, lambda p, r: finished.setdefault("ok", p.wait_check_finish(r)))
+            while "ok" not in finished:
+                yield ("wait", 0.3)
+            if os.path.exists(out):
+                self.last_photo = out
+                self.load_thumb()
+                self.done([])
+                self.view.banner = f"Saved {os.path.basename(out)}"
+                return
+        self.done(shots)
+
+    # ---------------------------------------------------------------------- ui
+    def load_thumb(self):
+        if not self.last_photo:
+            photos = sorted(f for f in os.listdir(PHOTO_DIR) if f.lower().endswith(".jpg"))
+            if photos:
+                self.last_photo = os.path.join(PHOTO_DIR, photos[-1])
+        if self.last_photo:
+            try:
+                pixbuf = GdkPixbuf.Pixbuf.new_from_file_at_size(self.last_photo, 96, 96)
+                pixbuf = pixbuf.apply_embedded_orientation() or pixbuf
+                side = min(pixbuf.get_width(), pixbuf.get_height())
+                pixbuf = pixbuf.new_subpixbuf((pixbuf.get_width() - side) // 2,
+                                              (pixbuf.get_height() - side) // 2, side, side)
+                pixbuf = pixbuf.scale_simple(44, 44, GdkPixbuf.InterpType.BILINEAR)
+                self.thumb_image.set_from_pixbuf(pixbuf)
+            except GLib.Error:
+                pass
+
+    def on_thumb(self, _button):
+        self.open_gallery()
+
+    # ----------------------------------------------------------------- gallery
+    def build_gallery(self):
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        self.gal_area = Gtk.DrawingArea()
+        self.gal_area.set_vexpand(True)
+        self.gal_area.connect("draw", self.on_gallery_draw)
+        self.gal_swipe = Gtk.GestureSwipe.new(self.gal_area)
+        self.gal_swipe.set_touch_only(False)
+        self.gal_swipe.connect("swipe", self.on_gallery_swipe)
+        box.pack_start(self.gal_area, True, True, 0)
+        self.gal_label = Gtk.Label()
+        self.gal_label.get_style_context().add_class("muted")
+        self.gal_label.set_margin_top(4)
+        box.pack_start(self.gal_label, False, False, 0)
+        bar = Gtk.Box(spacing=6, homogeneous=True)
+        bar.set_margin_start(6)
+        bar.set_margin_end(6)
+        bar.set_margin_top(4)
+        bar.set_margin_bottom(8)
+        self.gal_delete = Gtk.Button(label="Delete")
+        for label, handler in (("Back", lambda _b: self.close_gallery()),
+                               ("<", lambda _b: self.gallery_step(-1)),
+                               (">", lambda _b: self.gallery_step(1)),
+                               ("Delete", self.on_gallery_delete)):
+            button = Gtk.Button(label=label) if label != "Delete" else self.gal_delete
+            button.get_style_context().add_class("side")
+            button.set_size_request(-1, 52)
+            button.connect("clicked", handler)
+            bar.pack_start(button, True, True, 0)
+        box.pack_start(bar, False, False, 0)
+        self.gal_files = []
+        self.gal_index = 0
+        self.gal_pixbuf = None
+        self.gal_confirm = False
+        return box
+
+    def open_gallery(self):
+        self.gal_files = sorted(os.path.join(PHOTO_DIR, f) for f in os.listdir(PHOTO_DIR)
+                                if f.lower().endswith(".jpg"))
+        if not self.gal_files:
+            self.view.banner = "No photos yet"
+            return
+        self.gal_index = (self.gal_files.index(self.last_photo)
+                          if self.last_photo in self.gal_files else len(self.gal_files) - 1)
+        self.stack.set_visible_child_name("gallery")
+        self.gallery_show()
+
+    def close_gallery(self):
+        self.gal_pixbuf = None
+        self.stack.set_visible_child_name("cam")
+
+    def gallery_show(self):
+        self.gal_confirm = False
+        self.gal_delete.set_label("Delete")
+        path = self.gal_files[self.gal_index]
+        try:
+            pixbuf = GdkPixbuf.Pixbuf.new_from_file_at_size(path, 1440, 1440)
+            self.gal_pixbuf = pixbuf.apply_embedded_orientation() or pixbuf
+        except GLib.Error as error:
+            self.gal_pixbuf = None
+            print(f"gallery: {path}: {error}", file=sys.stderr)
+        self.gal_label.set_text(f"{os.path.basename(path)}   {self.gal_index + 1}/{len(self.gal_files)}")
+        self.gal_area.queue_draw()
+
+    def gallery_step(self, step):
+        if self.gal_files:
+            self.gal_index = (self.gal_index + step) % len(self.gal_files)
+            self.gallery_show()
+
+    def on_gallery_swipe(self, _gesture, vx, vy):
+        if abs(vx) > abs(vy) and abs(vx) > 150:
+            self.gallery_step(1 if vx < 0 else -1)
+
+    def on_gallery_delete(self, _button):
+        if not self.gal_confirm:
+            self.gal_confirm = True
+            self.gal_delete.set_label("Sure?")
+            return
+        path = self.gal_files.pop(self.gal_index)
+        try:
+            os.remove(path)
+        except OSError as error:
+            print(f"gallery: delete {path}: {error}", file=sys.stderr)
+        if self.last_photo == path:
+            self.last_photo = None
+        self.load_thumb()
+        if not self.gal_files:
+            self.close_gallery()
+            return
+        self.gal_index = min(self.gal_index, len(self.gal_files) - 1)
+        self.gallery_show()
+
+    def on_gallery_draw(self, widget, cr):
+        width, height = widget.get_allocated_width(), widget.get_allocated_height()
+        cr.set_source_rgb(0.1, 0.09, 0.14)
+        cr.paint()
+        pixbuf = self.gal_pixbuf
+        if pixbuf is None:
+            return
+        scale = min(width / pixbuf.get_width(), height / pixbuf.get_height())
+        cr.translate((width - pixbuf.get_width() * scale) / 2, (height - pixbuf.get_height() * scale) / 2)
+        cr.scale(scale, scale)
+        Gdk.cairo_set_source_pixbuf(cr, pixbuf, 0, 0)
+        cr.get_source().set_filter(cairo.FILTER_GOOD)
+        cr.paint()
+
+    def on_flash(self, _button):
+        self.s.flash = (self.s.flash + 1) % len(FLASH_NAMES)
+        self.apply_settings()
+        self.s.save()
+        self.refresh_ui()
+
+    def set_zoom(self, zoom):
+        zoom = max(1.0, min(zoom, MAX_ZOOM[self.s.camera]))
+        self.s.zoom = round(zoom, 2)
+        if self.apply_pending is None:
+            self.apply_pending = GLib.timeout_add(60, self.flush_apply)
+        self.refresh_zoom()
+
+    def on_zoom_step(self, _button, step):
+        self.set_zoom(float(step))
+
+    def on_pinch_begin(self, _gesture, _sequence):
+        self.pinch_base = self.s.zoom
+
+    def on_pinch(self, _gesture, scale):
+        self.set_zoom(self.pinch_base * scale)
+
+    def refresh_zoom(self):
+        zoom = self.s.zoom
+        top = MAX_ZOOM[self.s.camera]
+        shown = [(st, b) for st, b in self.zoom_buttons if st <= top]
+        exact = [b for st, b in shown if abs(zoom - st) < 0.05]
+        for st, button in self.zoom_buttons:
+            button.set_visible(st <= top)
+            button.set_label(f"{st}×")
+            button.get_style_context().remove_class("on")
+        if exact:
+            exact[0].get_style_context().add_class("on")
+        elif shown:
+            # pinch zoom between steps: the nearest button shows the live value
+            closest = min(shown, key=lambda item: abs(item[0] - zoom))[1]
+            closest.set_label(f"{zoom:.1f}×")
+            closest.get_style_context().add_class("on")
+        self.view.queue_draw()
+
+    def on_pro(self, _button):
+        self.s.pro = not self.s.pro
+        self.apply_settings()
+        self.refresh_ui()
+
+    def on_toggle(self, _button, key):
+        s = self.s
+        if key == "flip":
+            s.camera = 1 - s.camera
+            s.zoom = 1.0
+            s.save()
+            self.cam.send("reset")
+            self.start_camera()
+            self.refresh_ui()
+            return
+        if key == "grid":
+            s.grid = (s.grid + 1) % len(GRIDS)
+        else:
+            setattr(s, key, not getattr(s, key))
+        s.save()
+        self.refresh_ui()
+        self.view.queue_draw()
+
+    def on_mode(self, _button, index):
+        if self.s.mode == index and MODES[index] == "Timer":
+            self.s.timer = (self.s.timer + 1) % len(TIMERS)
+        self.s.mode = index
+        if MODES[index] == "Long" and self.s.pro:
+            self.s.manual_exp = True
+            if self.s.shutter < 1:
+                self.s.shutter_idx = SHUTTERS.index(4)
+            self.s.iso_idx = ISOS.index(100)
+            self.panel = "shutter"
+            self.apply_settings()
+        self.s.save()
+        self.refresh_ui()
+
+    def on_val(self, _button, key):
+        s = self.s
+        if key == "exp":
+            s.manual_exp = not s.manual_exp
+            self.panel = "shutter" if s.manual_exp else "ev"
+            self.apply_settings()
+        else:
+            self.panel = key
+        self.refresh_ui()
+
+    def on_af_toggle(self, _button):
+        self.s.af = not self.s.af
+        self.apply_settings()
+        self.refresh_ui()
+
+    def on_wb(self, _button, ident):
+        self.s.wb = ident
+        self.apply_settings()
+        self.refresh_ui()
+
+    def on_scale(self, scale):
+        if getattr(self, "updating", False):
+            return
+        s = self.s
+        value = scale.get_value()
+        if self.panel == "shutter":
+            s.shutter_idx = int(round(value))
+            s.manual_exp = True
+        elif self.panel == "iso":
+            s.iso_idx = int(round(value))
+            s.manual_exp = True
+        elif self.panel == "ev":
+            s.ev = int(round(value))
+        elif self.panel == "focus":
+            s.focus = value
+            s.af = False
+        elif self.panel == "wb":
+            s.kelvin = int(round(value / 100.0) * 100)
+            s.wb = 0
+        self.update_labels()
+        if self.apply_pending is None:
+            self.apply_pending = GLib.timeout_add(90, self.flush_apply)
+
+    apply_pending = None
+
+    def flush_apply(self):
+        self.apply_pending = None
+        self.apply_settings()
+        self.s.save()
+        return False
+
+    def update_labels(self):
+        s = self.s
+        title = lambda name, value, dim=False: (  # noqa: E731
+            f'<span size="x-small" foreground="#908caa">{name}</span>\n<span size="small"><b>{value}</b></span>')
+        labels = {
+            "exp": title("EXPO", "MAN" if s.manual_exp else "AUTO"),
+            "shutter": title("SHUTTER", fmt_shutter(s.shutter)),
+            "iso": title("ISO", s.iso),
+            "focus": title("FOCUS", "AF" if s.af and s.camera == 0 else ("fixed" if s.camera else fmt_focus(s.focus))),
+            "ev": title("EV", f"{s.ev / 2:+g}"),
+            "wb": title("WB", "Auto" if s.wb == 1 else (f"{s.kelvin}K" if s.wb == 0 else
+                                                       dict((i, n) for n, i in WB_PRESETS)[s.wb])),
+        }
+        for key, markup in labels.items():
+            button = self.val_buttons[key]
+            child = button.get_child()
+            if child is None:
+                child = Gtk.Label()
+                child.set_justify(Gtk.Justification.CENTER)
+                button.add(child)
+                child.show()
+            child.set_markup(markup)
+        text = {"shutter": fmt_shutter(s.shutter), "iso": str(s.iso), "ev": f"{s.ev / 2:+g} EV",
+                "focus": fmt_focus(s.focus), "wb": f"{s.kelvin} K"}.get(self.panel, "")
+        self.strip_label.set_text(text)
+
+    def refresh_ui(self):
+        s = self.s
+        for key, button in self.toggles.items():
+            ctx = button.get_style_context()
+            if key == "grid":
+                on = s.grid != 0
+                button.set_label("GRID" if s.grid == 0 else GRIDS[s.grid].upper())
+            elif key == "flip":
+                on = s.camera == 1
+                button.set_label("SELFIE" if on else "REAR")
+            else:
+                on = getattr(s, key)
+            (ctx.add_class if on else ctx.remove_class)("on")
+        for index, button in enumerate(self.mode_buttons):
+            ctx = button.get_style_context()
+            (ctx.add_class if index == s.mode else ctx.remove_class)("on")
+            name = MODES[index]
+            button.set_label(f"Timer {TIMERS[s.timer]}s" if name == "Timer" and index == s.mode else name)
+        self.flash_button.set_visible(s.camera == 0)
+        self.flash_button.set_label(f"FLASH {FLASH_NAMES[s.flash]}")
+        ctx = self.flash_button.get_style_context()
+        (ctx.add_class if s.flash else ctx.remove_class)("on")
+        s.zoom = min(s.zoom, MAX_ZOOM[s.camera])
+        self.refresh_zoom()
+        ctx = self.pro_button.get_style_context()
+        (ctx.add_class if s.pro else ctx.remove_class)("on")
+        self.pro_box.set_visible(s.pro)
+        self.pro_box.set_no_show_all(False)
+        if s.pro:
+            self.pro_box.show_all()
+            self.updating = True
+            panel = self.panel
+            is_wb = panel == "wb"
+            self.wb_box.set_visible(is_wb)
+            self.scale.set_visible(panel != "wb" or True)
+            self.af_button.set_visible(panel == "focus" and s.camera == 0)
+            self.strip_label.set_visible(True)
+            if panel == "shutter":
+                self.scale.set_range(0, len(SHUTTERS) - 1)
+                self.scale.set_increments(1, 1)
+                self.scale.set_value(s.shutter_idx)
+            elif panel == "iso":
+                self.scale.set_range(0, len(ISOS) - 1)
+                self.scale.set_increments(1, 1)
+                self.scale.set_value(s.iso_idx)
+            elif panel == "ev":
+                self.scale.set_range(-4, 4)
+                self.scale.set_increments(1, 1)
+                self.scale.set_value(s.ev)
+            elif panel == "focus":
+                self.scale.set_range(0, 10)
+                self.scale.set_increments(0.1, 1)
+                self.scale.set_value(s.focus)
+            elif panel == "wb":
+                self.scale.set_range(2500, 9000)
+                self.scale.set_increments(100, 500)
+                self.scale.set_value(s.kelvin)
+            self.updating = False
+            sensitive = {"shutter": s.manual_exp, "iso": s.manual_exp, "ev": not s.manual_exp,
+                         "focus": s.camera == 0}
+            for key, button in self.val_buttons.items():
+                ctx = button.get_style_context()
+                (ctx.add_class if key == panel else ctx.remove_class)("sel")
+                dim = key in sensitive and not sensitive[key]
+                (ctx.add_class if dim else ctx.remove_class)("dim")
+            for ident, button in self.wb_buttons.items():
+                ctx = button.get_style_context()
+                (ctx.add_class if ident == s.wb else ctx.remove_class)("on")
+            ctx = self.af_button.get_style_context()
+            (ctx.add_class if s.af else ctx.remove_class)("on")
+            self.update_labels()
+            if not is_wb:
+                self.wb_box.hide()
+        self.view.queue_draw()
+
+    def on_destroy(self, _widget):
+        self.s.save()
+        try:
+            subprocess.run([f"{BIN}/lagos-camera", "stop"], timeout=10)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+        Gtk.main_quit()
+
+
+def debug_commands(app, snapshot):
+    """LAGOS_CAM_DEBUG=1: drive the UI from $XDG_RUNTIME_DIR/lagos-pro-camera.cmd (one command
+    per line: pro | shutter | mode N | val KEY | toggle KEY | scale V | wb ID | af | snap | quit)."""
+    path = os.path.join(os.environ.get("XDG_RUNTIME_DIR", "/tmp"), "lagos-pro-camera.cmd")
+    try:
+        os.unlink(path)
+    except OSError:
+        pass
+    os.mkfifo(path, 0o600)
+    fd = os.open(path, os.O_RDWR | os.O_NONBLOCK)
+
+    def run(_fd, _cond):
+        for line in os.read(fd, 4096).decode().splitlines():
+            word = line.split()
+            if not word:
+                continue
+            if word[0] == "pro":
+                app.on_pro(None)
+            elif word[0] == "shutter":
+                app.on_shutter(None)
+            elif word[0] == "mode":
+                app.on_mode(None, int(word[1]))
+            elif word[0] == "val":
+                app.on_val(None, word[1])
+            elif word[0] == "toggle":
+                app.on_toggle(None, word[1])
+            elif word[0] == "scale":
+                app.scale.set_value(float(word[1]))
+            elif word[0] == "wb":
+                app.on_wb(None, int(word[1]))
+            elif word[0] == "zoom":
+                app.set_zoom(float(word[1]))
+            elif word[0] == "flash":
+                app.on_flash(None)
+            elif word[0] == "af":
+                app.on_af_toggle(None)
+            elif word[0] == "snap":
+                snapshot()
+            elif word[0] == "quit":
+                app.destroy()
+        return True
+
+    GLib.io_add_watch(fd, GLib.IO_IN, run)
+
+
+def main():
+    if "--help" in sys.argv:
+        print(__doc__)
+        return
+    signal.signal(signal.SIGINT, signal.SIG_DFL)
+    GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, signal.SIGTERM, lambda: Gtk.main_quit() or False)
+    app = ProCamera()
+
+    def snapshot():
+        # debugging: SIGUSR1 renders the window (grim is black on this sway) into $XDG_RUNTIME_DIR
+        alloc = app.get_allocation()
+        surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, alloc.width, alloc.height)
+        cr = cairo.Context(surface)
+        app.draw(cr)
+        print("min width", app.get_preferred_width(), "alloc", alloc.width, flush=True)
+        out = os.path.join(os.environ.get("XDG_RUNTIME_DIR", "/tmp"), "lagos-pro-camera.png")
+        surface.write_to_png(out)
+        return True
+
+    GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, signal.SIGUSR1, snapshot)
+    if os.environ.get("LAGOS_CAM_DEBUG"):
+        debug_commands(app, snapshot)
+    Gtk.main()
+
+
+if __name__ == "__main__":
+    main()

@@ -13,7 +13,11 @@ export ATL_AUDIO_ROUTE_CMD="$HOME/.local/bin/lagos-audio-route"
 # camera (QR scan for "Link a device"): frames from the stock camera HAL via lagos-camera
 export ATL_CAMERA_CMD="$HOME/.local/bin/lagos-camera"
 export ATL_CONTACTS_DEBUG=1
+export ATL_NO_AI=1
 export ATL_BACKGROUND=1
+export ATL_DUMP_VIEWS=1
+export ATL_DEBUG_VTO=1
+export ATL_DEBUG_HINT=1
 # WhatsApp's native code makes JNI calls with an exception pending; CheckJNI would abort
 export ATL_CHECKJNI=0
 exec "$HOME/.local/bin/atl-run" "$@" com.whatsapp "$HOME/apks/whatsapp.apk"

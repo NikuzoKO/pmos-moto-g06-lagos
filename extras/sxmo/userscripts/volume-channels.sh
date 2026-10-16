@@ -7,7 +7,12 @@
 # shellcheck source=scripts/core/sxmo_common.sh
 . sxmo_common.sh
 
-vol() { wpctl get-volume "$1" 2>/dev/null | awk '{ v = int($2 * 100 + 0.5); print ($3 ? v "% (muted)" : v "%") }'; }
+SOUND="$HOME/.local/bin/lagos-sound"
+
+# "<volume>%", "vibrate" or "muted" for a channel
+show() {
+	"$SOUND" status | awk -v c="$1" '$1 == c { print ($3 == "vibrate" ? "vibrate" : $3 == "mute" ? "muted" : $2 "%") }'
+}
 
 setvol() {
 	pick="$(printf '%s\n' "$icon_cls Back" 0 10 20 30 40 50 60 70 80 90 100 |
@@ -15,23 +20,24 @@ setvol() {
 	case "$pick" in
 		*Back) return ;;
 	esac
-	wpctl set-mute "$1" 0
-	wpctl set-volume "$1" "$pick%"
-	[ "$2" = Notifications ] && mpv --no-resume-playback --quiet --no-video \
-		--audio-device=pipewire/lagos-notify "${SXMO_TEXTSOUND:-/usr/share/sxmo/notify.ogg}" >/dev/null 2>&1 &
+	"$SOUND" set "$1" sound
+	"$SOUND" volume "$1" "$pick"
+	[ "$1" = notify ] && "$SOUND" play notify "${SXMO_TEXTSOUND:-/usr/share/sxmo/notify.ogg}" &
 }
-
-nodeid() { pw-cli ls Node 2>/dev/null | awk -v n="\"$1\"" '/^\tid /{ i = $2 } $3 == n { sub(",", "", i); print i; exit }'; }
 
 while : ; do
 	pick="$(printf '%s\n' \
 		"$icon_cls Close Menu" \
-		"$icon_mus Media: $(vol "$(nodeid lagos-media)")" \
-		"$icon_bel Notifications: $(vol "$(nodeid lagos-notify)")" |
+		"$icon_mus Music: $(show media)" \
+		"$icon_bel Notifications: $(show notify)" \
+		"$icon_bel Alarms: $(show alarm)" \
+		"$icon_cfg System: $(show system)" |
 		sxmo_dmenu.sh -p "Volume")" || exit 0
 	case "$pick" in
-		*Media:*) setvol "$(nodeid lagos-media)" Media ;;
-		*Notifications:*) setvol "$(nodeid lagos-notify)" Notifications ;;
+		*Music:*) setvol media Music ;;
+		*Notifications:*) setvol notify Notifications ;;
+		*Alarms:*) setvol alarm Alarms ;;
+		*System:*) setvol system System ;;
 		*) exit 0 ;;
 	esac
 done

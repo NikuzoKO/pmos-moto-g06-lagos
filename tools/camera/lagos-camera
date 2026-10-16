@@ -18,7 +18,7 @@ alive() {
 
 stop() {
 	alive $PIDFILE && sudo -n kill "$(cat $PIDFILE)"
-	sudo -n rm -f $PIDFILE $RUN/frame
+	sudo -n rm -f $PIDFILE $RUN/frame $RUN/frame.ctl $RUN/frame.ev
 }
 
 case ${1:-} in
@@ -39,7 +39,7 @@ start)
 		sleep 2
 	fi
 	sudo -n mkdir -p $RUN $M/mnt/hostcam
-	sudo -n chmod 755 $RUN
+	sudo -n chmod 777 $RUN
 	mountpoint -q $M/mnt/hostcam || sudo -n mount --bind $RUN $M/mnt/hostcam
 	sudo -n setsid env -i PATH=/system/bin:/vendor/bin LD_PRELOAD=/system/lib64/libpropshim.so \
 		ANDROID_ROOT=/system ANDROID_DATA=/data ANDROID_I18N_ROOT=/apex/com.android.i18n \

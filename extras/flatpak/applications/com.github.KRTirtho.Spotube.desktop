@@ -1,9 +1,0 @@
-[Desktop Entry]
-Type=Application
-Name=Spotube
-Comment=Spotify metadata with streams from YouTube and other providers
-Categories=Audio;Music;Player;AudioVideo;
-Exec=/home/nikuzo/.local/bin/lagos-flatpak-run com.github.KRTirtho.Spotube %U
-Icon=com.github.KRTirtho.Spotube
-StartupWMClass=spotube
-Terminal=false

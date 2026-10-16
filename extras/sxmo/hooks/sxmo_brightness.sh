@@ -13,7 +13,8 @@
 
 notify() {
 	if [ -z "$SXMO_WOB_DISABLE" ]; then
-		getvalue > "$XDG_RUNTIME_DIR"/sxmo.obsock
+		# the second word tells lagos-volume-osd this is brightness, not volume
+		echo "$(getvalue) brightness" > "$XDG_RUNTIME_DIR"/sxmo.obsock
 	else
 		getvalue | xargs notify-send -r 888 "$icon_brightness Brightness"
 	fi

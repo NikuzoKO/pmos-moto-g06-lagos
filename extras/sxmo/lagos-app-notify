@@ -1,7 +1,7 @@
 #!/bin/sh
 # dunst script for notifications from Android apps (Android Translation Layer,
 # see dunstrc.d/60-android-apps.conf): sound + buzz like sxmo_hook_sms.sh,
-# honouring sxmo's .busy (silent until), .noring and .novibrate flags. Runs
+# honouring the notification channel mode (lagos-sound) and sxmo's .busy (silent until), .noring and .novibrate flags. Runs
 # again when an app updates a notification (WhatsApp does so for every new
 # message in a chat).
 # Low urgency = an ongoing notification or a repeat of an onlyAlertOnce one
@@ -14,11 +14,13 @@ if [ -f "$cfg/.busy" ]; then
 		exit 0
 	fi
 fi
-if [ ! -f "$cfg/.noring" ]; then
+# Channel state from the volume panel (and vibrate-only at night)
+mode="$("$HOME/.local/bin/lagos-sound" mode notify 2>/dev/null || echo sound)"
+if [ "$mode" = sound ] && [ ! -f "$cfg/.noring" ]; then
 	sound="${SXMO_TEXTSOUND:-/usr/share/sxmo/notify.ogg}"
 	mpv --no-resume-playback --quiet --no-video --audio-device=pipewire/lagos-notify "$sound" >/dev/null 2>&1 &
 fi
-if [ ! -f "$cfg/.novibrate" ]; then
+if [ "$mode" != mute ] && [ ! -f "$cfg/.novibrate" ]; then
 	"$HOME/.local/bin/lagos-vibrate" 200 200 &
 fi
 wait

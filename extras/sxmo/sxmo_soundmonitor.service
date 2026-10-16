@@ -1,0 +1,13 @@
+# Copy to ~/.config/services/ (superd's user service directory). Overrides
+# sxmo's service: superd gives up after 5 failed starts in 10 s, which is what
+# happens while pipewire-pulse is down (e.g. a pipewire restart), and the
+# volume overlay then stays dead. This one never exits: it waits for the
+# pulse socket, runs the monitor, and starts over when the monitor ends.
+[Unit]
+Description=Sxmo: watch audio changes and update the status bar (restarts itself)
+
+[Service]
+Type=simple
+Restart=always
+RestartSec=1s
+ExecStart=/bin/sh -c 'while :; do until pactl info >/dev/null 2>&1; do sleep 1; done; /usr/bin/sxmo_soundmonitor.sh; sleep 1; done'
