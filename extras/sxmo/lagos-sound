@@ -1,0 +1,102 @@
+#!/bin/sh
+# lagos-sound: per-channel sound state for the volume channels
+# (audio/60-lagos-channels.conf). Channels: media notify alarm system.
+#   lagos-sound status              one line per channel: <ch> <volume %> <mode>
+#   lagos-sound mode <ch>           what an alert on <ch> should do right now:
+#                                   sound | vibrate | mute
+#   lagos-sound set <ch> <mode>     sound | vibrate | mute
+#   lagos-sound cycle <ch>          sound -> vibrate -> mute -> sound
+#   lagos-sound volume <ch> <pct>   set the channel volume (0 on a non-media
+#                                   channel means vibrate, above 0 leaves it)
+#   lagos-sound play <ch> <file>    play a sound on the channel's sink
+# Vibrate is a flag file next to the unchanged volume, so going back to sound
+# keeps the old level; mute is the sink's own mute. Notifications are
+# vibrate-only from NIGHT_START to NIGHT_END (a mute stays a mute).
+NIGHT_START=2330
+NIGHT_END=0700
+state="${XDG_STATE_HOME:-$HOME/.local/state}/lagos-sound"
+export XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-/run/user/$(id -u)}
+
+sink() {
+	case "$1" in
+		media | notify | alarm | system) echo "lagos-$1" ;;
+		*) echo "lagos-sound: unknown channel '$1'" >&2; exit 2 ;;
+	esac
+}
+
+nodeid() {
+	pw-cli ls Node 2>/dev/null | awk -v n="\"$1\"" '/^\tid /{ i = $2 } $3 == n { sub(",", "", i); print i; exit }'
+}
+
+# stored mode: sound | vibrate | mute
+stored_mode() {
+	id="$(nodeid "$(sink "$1")")"
+	[ -n "$id" ] || { echo sound; return; }
+	if wpctl get-volume "$id" 2>/dev/null | grep -q MUTED; then
+		echo mute
+	elif [ -f "$state/$1.vibrate" ]; then
+		echo vibrate
+	else
+		echo sound
+	fi
+}
+
+night() {
+	hm="$(date +%H%M | sed 's/^0*//')"
+	hm="${hm:-0}"
+	[ "$hm" -ge "$NIGHT_START" ] || [ "$hm" -lt "$((${NIGHT_END#0}))" ]
+}
+
+effective_mode() {
+	m="$(stored_mode "$1")"
+	if [ "$1" = notify ] && [ "$m" = sound ] && night; then
+		m=vibrate
+	fi
+	echo "$m"
+}
+
+set_mode() {
+	id="$(nodeid "$(sink "$1")")"
+	[ -n "$id" ] || exit 1
+	mkdir -p "$state"
+	case "$2" in
+		sound) rm -f "$state/$1.vibrate"; wpctl set-mute "$id" 0 ;;
+		vibrate) : > "$state/$1.vibrate"; wpctl set-mute "$id" 0 ;;
+		mute) rm -f "$state/$1.vibrate"; wpctl set-mute "$id" 1 ;;
+		*) echo "lagos-sound: unknown mode '$2'" >&2; exit 2 ;;
+	esac
+}
+
+volume_of() {
+	wpctl get-volume "$(nodeid "$(sink "$1")")" 2>/dev/null | awk '{ print int($2 * 100 + 0.5) }'
+}
+
+case "$1" in
+	status)
+		for ch in media notify alarm system; do
+			echo "$ch $(volume_of "$ch") $(stored_mode "$ch")"
+		done ;;
+	mode) effective_mode "$2" ;;
+	set) set_mode "$2" "$3" ;;
+	cycle)
+		case "$(stored_mode "$2")" in
+			sound) set_mode "$2" vibrate ;;
+			vibrate) set_mode "$2" mute ;;
+			*) set_mode "$2" sound ;;
+		esac ;;
+	volume)
+		id="$(nodeid "$(sink "$2")")"
+		[ -n "$id" ] || exit 1
+		pct="$3"
+		if [ "$2" != media ] && [ "$pct" -le 0 ]; then
+			set_mode "$2" vibrate
+		else
+			[ "$(stored_mode "$2")" = mute ] && set_mode "$2" sound
+			[ "$2" != media ] && rm -f "$state/$2.vibrate"
+			wpctl set-volume "$id" "$pct%"
+		fi ;;
+	play)
+		mpv --no-resume-playback --quiet --no-video \
+			--audio-device="pipewire/$(sink "$2")" "$3" >/dev/null 2>&1 ;;
+	*) sed -n '2,/^NIGHT_START/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//' >&2; exit 2 ;;
+esac

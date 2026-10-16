@@ -6,6 +6,8 @@
 # ~/.config/services/sxmo_wob.service just points sxmo_ob.sh here.
 
 import math
+import os
+import subprocess
 import sys
 
 import cairo
@@ -13,11 +15,25 @@ import gi
 
 gi.require_version("Gtk", "3.0")
 gi.require_version("GtkLayerShell", "0.1")
-from gi.repository import GLib, Gtk, GtkLayerShell  # noqa: E402
+from gi.repository import Gdk, GLib, Gtk, GtkLayerShell  # noqa: E402
+
+SOUND = os.path.join(os.path.dirname(os.path.realpath(__file__)), "lagos-sound")
 
 # Logical pixels (sway scales them)
 CARD_WIDTH = 56
 CARD_HEIGHT = 200
+# Volume only: a meatballs button under the percentage opens the channel panel
+MORE_HEIGHT = 32
+# The panel: one row per channel, a slider and (all but media) a mode pill
+PANEL_WIDTH = 300
+PANEL_PAD = 16
+ROW_HEIGHT = 62
+PILL_WIDTH = 76
+PILL_HEIGHT = 30
+SLIDER_HEIGHT = 14
+CHANNELS = [("media", "Music"), ("notify", "Notifications"), ("alarm", "Alarms"), ("system", "System")]
+MODE_LABEL = {"sound": "Sound", "vibrate": "Vibrate", "mute": "Mute"}
+PANEL_HIDE_AFTER_MS = 6000
 CARD_RADIUS = 18
 BAR_WIDTH = 14
 BAR_HEIGHT = 140
@@ -36,6 +52,7 @@ BAR_ANIMATION_MS = 220
 CARD_COLOR = (0.098, 0.090, 0.141, 0.88)  # base
 TRACK_COLOR = (0.251, 0.239, 0.322, 0.95)  # highlight med
 FILL_COLOR = (0.769, 0.655, 0.906, 1.0)  # iris
+DIM_COLOR = (0.431, 0.416, 0.525, 1.0)  # muted
 TEXT_COLOR = (0.878, 0.871, 0.957, 1.0)  # text
 
 
@@ -85,6 +102,10 @@ class VolumeOverlay(Gtk.Window):
     def __init__(self):
         super().__init__()
         self.percent = 0
+        self.is_volume = True
+        self.expanded = False
+        self.rows = {}
+        self.drag = None
         self.bar = Animation(0.0)
         self.opacity = Animation(0.0)
         self.fading_out = False
@@ -100,20 +121,136 @@ class VolumeOverlay(Gtk.Window):
         GtkLayerShell.set_keyboard_mode(self, GtkLayerShell.KeyboardMode.NONE)
         GtkLayerShell.set_namespace(self, "lagos-volume-osd")
 
-        self.set_size_request(CARD_WIDTH, CARD_HEIGHT)
         self.set_app_paintable(True)
         visual = self.get_screen().get_rgba_visual()
         if visual:
             self.set_visual(visual)
 
         self.area = Gtk.DrawingArea()
+        self.area.add_events(Gdk.EventMask.BUTTON_PRESS_MASK | Gdk.EventMask.BUTTON_RELEASE_MASK
+                             | Gdk.EventMask.POINTER_MOTION_MASK)
         self.area.connect("draw", self.on_draw)
+        self.area.connect("button-press-event", self.on_press)
+        self.area.connect("motion-notify-event", self.on_motion)
+        self.area.connect("button-release-event", self.on_release)
         self.add(self.area)
-        self.connect("realize", self.on_realize)
+        self.connect("realize", lambda _w: self.apply_layout())
 
-    def on_realize(self, _window):
-        # Let touches go through to whatever is underneath
-        self.input_shape_combine_region(cairo.Region())
+    def card_size(self):
+        if self.expanded:
+            return PANEL_WIDTH, PANEL_PAD * 2 + ROW_HEIGHT * len(CHANNELS)
+        return CARD_WIDTH, CARD_HEIGHT + (MORE_HEIGHT if self.is_volume else 0)
+
+    def more_rect(self):
+        # The meatballs button: the strip under the percentage (collapsed), or
+        # the top right corner of the panel (expanded)
+        if self.expanded:
+            return (PANEL_WIDTH - PANEL_PAD - 36, 6, 36, 24)
+        return (0, CARD_HEIGHT, CARD_WIDTH, MORE_HEIGHT)
+
+    def apply_layout(self):
+        width, height = self.card_size()
+        self.set_size_request(width, height)
+        self.resize(width, height)
+        if not self.get_window():
+            return
+        # Touches go through, except on the meatballs button (collapsed) or
+        # anywhere on the panel (expanded)
+        if self.expanded:
+            region = cairo.Region(cairo.RectangleInt(0, 0, width, height))
+        elif self.is_volume:
+            x, y, w, h = self.more_rect()
+            region = cairo.Region(cairo.RectangleInt(x, y, w, h))
+        else:
+            region = cairo.Region()
+        self.input_shape_combine_region(region)
+
+    def run_sound(self, *args):
+        subprocess.run([SOUND, *args], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+
+    def refresh_rows(self):
+        try:
+            out = subprocess.run([SOUND, "status"], capture_output=True, text=True, timeout=3, check=False).stdout
+        except (OSError, subprocess.SubprocessError):
+            return
+        for line in out.splitlines():
+            parts = line.split()
+            if len(parts) == 3 and parts[1].isdigit():
+                self.rows[parts[0]] = {"volume": int(parts[1]), "mode": parts[2]}
+
+    def set_expanded(self, expanded):
+        self.expanded = expanded
+        if expanded:
+            self.refresh_rows()
+        self.apply_layout()
+        self.restart_hide_timer()
+        self.area.queue_draw()
+
+    def row_top(self, index):
+        return PANEL_PAD + index * ROW_HEIGHT
+
+    def slider_rect(self, index, channel):
+        pill = PILL_WIDTH + 12 if channel != "media" else 0
+        return (PANEL_PAD, self.row_top(index) + 30, PANEL_WIDTH - PANEL_PAD * 2 - pill, SLIDER_HEIGHT)
+
+    def pill_rect(self, index):
+        return (PANEL_WIDTH - PANEL_PAD - PILL_WIDTH, self.row_top(index) + 22, PILL_WIDTH, PILL_HEIGHT)
+
+    @staticmethod
+    def inside(rect, x, y, slack=0):
+        rx, ry, rw, rh = rect
+        return rx - slack <= x <= rx + rw + slack and ry - slack <= y <= ry + rh + slack
+
+    def slider_value(self, index, channel, x):
+        sx, _sy, sw, _sh = self.slider_rect(index, channel)
+        return round(max(0.0, min((x - sx) / sw, 1.0)) * 100)
+
+    def on_press(self, _area, event):
+        self.restart_hide_timer()
+        if self.inside(self.more_rect(), event.x, event.y):
+            self.set_expanded(not self.expanded)
+            return True
+        if not self.expanded:
+            return True
+        for index, (channel, _label) in enumerate(CHANNELS):
+            if channel != "media" and self.inside(self.pill_rect(index), event.x, event.y):
+                self.run_sound("cycle", channel)
+                self.refresh_rows()
+                self.area.queue_draw()
+                return True
+            if self.inside(self.slider_rect(index, channel), event.x, event.y, slack=16):
+                self.drag = index
+                self.apply_drag(event.x)
+                return True
+        return True
+
+    def on_motion(self, _area, event):
+        if self.drag is not None:
+            self.restart_hide_timer()
+            self.apply_drag(event.x)
+        return True
+
+    def on_release(self, _area, event):
+        if self.drag is not None:
+            self.apply_drag(event.x, commit=True)
+            self.drag = None
+        return True
+
+    def apply_drag(self, x, commit=False):
+        channel = CHANNELS[self.drag][0]
+        value = self.slider_value(self.drag, channel, x)
+        row = self.rows.setdefault(channel, {"volume": 0, "mode": "sound"})
+        row["volume"] = value
+        if channel != "media":
+            row["mode"] = "vibrate" if value == 0 else "sound"
+        # The slider follows the finger at once; the audio server is told on
+        # release, and while dragging when the value changes by a few percent
+        if commit or abs(value - row.get("sent", -100)) >= 5:
+            row["sent"] = value
+            self.run_sound("volume", channel, str(value))
+            if channel == "media":
+                self.percent = value
+        self.area.queue_draw()
 
     def on_draw(self, _area, context):
         context.set_operator(cairo.OPERATOR_SOURCE)
@@ -124,9 +261,16 @@ class VolumeOverlay(Gtk.Window):
         # Draw the whole card, then composite it at the fade opacity
         context.push_group()
 
+        width, height = self.card_size()
         context.set_source_rgba(*CARD_COLOR)
-        rounded_rectangle(context, 0, 0, CARD_WIDTH, CARD_HEIGHT, CARD_RADIUS)
+        rounded_rectangle(context, 0, 0, width, height, CARD_RADIUS)
         context.fill()
+
+        if self.expanded:
+            self.draw_panel(context)
+            context.pop_group_to_source()
+            context.paint_with_alpha(max(0.0, min(self.opacity.value, 1.0)))
+            return False
 
         bar_x = (CARD_WIDTH - BAR_WIDTH) / 2
         context.set_source_rgba(*TRACK_COLOR)
@@ -155,9 +299,81 @@ class VolumeOverlay(Gtk.Window):
         context.set_source_rgba(*TEXT_COLOR)
         context.show_text(label)
 
+        if self.is_volume:
+            self.draw_meatballs(context, self.more_rect())
+
         context.pop_group_to_source()
         context.paint_with_alpha(max(0.0, min(self.opacity.value, 1.0)))
         return False
+
+    @staticmethod
+    def draw_meatballs(context, rect):
+        # Three dots in a row
+        x, y, w, h = rect
+        context.set_source_rgba(*TEXT_COLOR)
+        for dx in (-9, 0, 9):
+            context.arc(x + w / 2 + dx, y + h / 2, 2.6, 0, 2 * math.pi)
+            context.fill()
+
+    def draw_text(self, context, text, x, y, size, color, bold=False, right=False):
+        context.select_font_face("Roboto Mono", cairo.FONT_SLANT_NORMAL,
+                                 cairo.FONT_WEIGHT_BOLD if bold else cairo.FONT_WEIGHT_NORMAL)
+        context.set_font_size(size)
+        extents = context.text_extents(text)
+        context.move_to(x - (extents.width + extents.x_bearing if right else 0), y)
+        context.set_source_rgba(*color)
+        context.show_text(text)
+
+    def draw_panel(self, context):
+        self.draw_meatballs(context, self.more_rect())
+        for index, (channel, label) in enumerate(CHANNELS):
+            row = self.rows.get(channel, {"volume": 0, "mode": "sound"})
+            mode = row["mode"]
+            top = self.row_top(index)
+            active = mode == "sound"
+            self.draw_text(context, label, PANEL_PAD, top + 20, 14, TEXT_COLOR, bold=True)
+
+            sx, sy, sw, sh = self.slider_rect(index, channel)
+            context.set_source_rgba(*TRACK_COLOR)
+            rounded_rectangle(context, sx, sy, sw, sh, sh / 2)
+            context.fill()
+            fill_width = sw * (row["volume"] if active or channel == "media" and mode != "mute" else 0) / 100
+            if fill_width > 0:
+                context.save()
+                rounded_rectangle(context, sx, sy, sw, sh, sh / 2)
+                context.clip()
+                context.set_source_rgba(*FILL_COLOR)
+                context.rectangle(sx, sy, fill_width, sh)
+                context.fill()
+                context.restore()
+
+            if channel == "media":
+                self.draw_text(context, f"{row['volume']}%", PANEL_WIDTH - PANEL_PAD, top + 20, 13, TEXT_COLOR, right=True)
+                continue
+            px, py, pw, ph = self.pill_rect(index)
+            context.set_source_rgba(*(FILL_COLOR if active else TRACK_COLOR))
+            rounded_rectangle(context, px, py, pw, ph, ph / 2)
+            context.fill()
+            pill_text = TEXT_COLOR if not active else CARD_COLOR[:3] + (1.0,)
+            if mode == "mute":
+                pill_text = DIM_COLOR
+            extents_label = MODE_LABEL[mode]
+            context.select_font_face("Roboto Mono", cairo.FONT_SLANT_NORMAL, cairo.FONT_WEIGHT_BOLD)
+            context.set_font_size(12)
+            extents = context.text_extents(extents_label)
+            self.draw_text(context, extents_label, px + (pw - extents.width) / 2 - extents.x_bearing,
+                           py + (ph + extents.height) / 2, 12, pill_text, bold=True)
+
+    def restart_hide_timer(self):
+        if self.hide_timer:
+            GLib.source_remove(self.hide_timer)
+        after = PANEL_HIDE_AFTER_MS if self.expanded else HIDE_AFTER_MS
+        self.hide_timer = GLib.timeout_add(after, self.on_hide_timer)
+        # Touching it brings it back if it was fading out
+        if self.opacity.end_value != 1.0:
+            self.fading_out = False
+            self.opacity.retarget(1.0, FADE_IN_MS, self.now_us())
+            self.start_ticking()
 
     def now_us(self):
         frame_clock = self.get_frame_clock()
@@ -179,13 +395,23 @@ class VolumeOverlay(Gtk.Window):
         self.tick_id = None
         if self.fading_out:
             self.fading_out = False
+            self.expanded = False
+            self.drag = None
             self.hide()
+            self.apply_layout()
         return False
 
-    def show_percent(self, percent):
+    def show_percent(self, percent, is_volume=True):
         self.percent = percent
+        if is_volume != self.is_volume or not self.get_visible():
+            self.is_volume = is_volume
+            self.expanded = self.expanded and is_volume
+            self.apply_layout()
+        if self.expanded:
+            self.rows.setdefault("media", {"volume": percent, "mode": "sound"})["volume"] = percent
         if not self.get_visible():
             self.show_all()
+            self.apply_layout()
         now = self.now_us()
 
         self.bar.retarget(float(percent), BAR_ANIMATION_MS, now)
@@ -195,9 +421,7 @@ class VolumeOverlay(Gtk.Window):
             self.opacity.retarget(1.0, FADE_IN_MS, now)
         self.start_ticking()
 
-        if self.hide_timer:
-            GLib.source_remove(self.hide_timer)
-        self.hide_timer = GLib.timeout_add(HIDE_AFTER_MS, self.on_hide_timer)
+        self.restart_hide_timer()
 
     def on_hide_timer(self):
         self.hide_timer = None
@@ -219,7 +443,8 @@ def main():
         # plain numbers (and "muted" as 0)
         words = line.split()
         try:
-            overlay.show_percent(round(float(words[0])))
+            # sxmo_brightness.sh adds "brightness" after its number
+            overlay.show_percent(round(float(words[0])), is_volume=words[1:2] != ["brightness"])
         except (IndexError, ValueError):
             pass
         return True
